@@ -8,165 +8,150 @@
 #Log all actions for troubleshooting
 #Handle running as SYSTEM account properly
 
-# Function to check if device is already domain joined
-function Check-DomainStatus {
-    try {
-        $computerSystem = Get-WmiObject -Class Win32_ComputerSystem
-        $isDomainJoined = $computerSystem.PartOfDomain
-        $isAADJoined = (dsregcmd /status | Select-String "AzureAdJoined").ToString().Contains("YES")
-        
-        Write-Output "Domain Join Status: $isDomainJoined"
-        Write-Output "Azure AD Join Status: $isAADJoined"
-        
-        if ($isDomainJoined -or $isAADJoined) {
-            return $true
-        }
+# Function to test basic requirements and connectivity
+function Test-Prerequisites {
+    Write-Host "`n=== Testing Prerequisites ===" -ForegroundColor Cyan
+    
+    # Check domain status
+    $computerSystem = Get-WmiObject -Class Win32_ComputerSystem
+    $isDomainJoined = $computerSystem.PartOfDomain
+    $isAADJoined = (dsregcmd /status | Select-String "AzureAdJoined").ToString().Contains("YES")
+    
+    Write-Host "Domain Joined: $isDomainJoined"
+    Write-Host "Azure AD Joined: $isAADJoined"
+    
+    if ($isDomainJoined -or $isAADJoined) {
+        Write-Host "Device is already domain or AAD joined - skipping enrollment" -ForegroundColor Yellow
         return $false
     }
-    catch {
-        Write-Error "Error checking domain status: $_"
-        return $true # Fail safe - if we can't check, assume it's joined
-    }
-}
 
-# Function to get current interactive user when running as SYSTEM
-function Get-InteractiveUser {
-    try {
-        $explorerProcesses = Get-WmiObject -Query "Select * FROM Win32_Process WHERE Name='explorer.exe'"
-        if ($explorerProcesses) {
-            foreach ($explorer in $explorerProcesses) {
-                $owner = $explorer.GetOwner()
-                if ($owner.User -ne "SYSTEM") {
-                    return @{
-                        Username = $owner.User
-                        Domain = $owner.Domain
-                    }
-                }
-            }
+    # Test key endpoints
+    Write-Host "`nTesting connectivity to required endpoints:" -ForegroundColor Cyan
+    $endpoints = @(
+        "login.microsoftonline.com",
+        "portal.manage.microsoft.com",
+        "enrollment.manage.microsoft.com"
+    )
+    
+    $hasError = $false
+    foreach ($endpoint in $endpoints) {
+        $test = Test-NetConnection -ComputerName $endpoint -Port 443 -WarningAction SilentlyContinue
+        if ($test.TcpTestSucceeded) {
+            Write-Host "✓ $endpoint" -ForegroundColor Green
+        } else {
+            Write-Host "✗ $endpoint" -ForegroundColor Red
+            $hasError = $true
         }
-        Write-Output "No interactive user found"
-        return $null
     }
-    catch {
-        Write-Error "Error getting interactive user: $_"
-        return $null
+
+    if ($hasError) {
+        Write-Host "`nConnectivity test failed - please check network connectivity" -ForegroundColor Red
+        return $false
     }
+
+    return $true
 }
 
-# Create registry values for all users
-function Set-RegistryForAllUsers {
+# Install Company Portal and set registry keys
+function Install-EnrollmentPrerequisites {
+    Write-Host "`n=== Installing Prerequisites ===" -ForegroundColor Cyan
+    
     try {
-        # Default user profile hive
-        $defaultUserPath = "C:\Users\Default\NTUSER.DAT"
-        
-        # Load the default user hive
-        reg load "HKU\DefaultUser" $defaultUserPath
-
-        # Set registry for default profile
-        reg add "HKU\DefaultUser\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\MDM" /v "EnableMDMEnrollment" /t REG_DWORD /d 1 /f
-
-        # Unload the hive
-        [gc]::Collect()
-        reg unload "HKU\DefaultUser"
-
-        # Set for HKLM
+        # Set registry keys
+        Write-Host "Setting MDM registry keys..." -NoNewline
         $regPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\MDM"
         if (-not (Test-Path $regPath)) {
             New-Item -Path $regPath -Force | Out-Null
         }
-        New-ItemProperty -Path $regPath -Name "EnableMDMEnrollment" -Value 1 -PropertyType DWORD -Force
+        New-ItemProperty -Path $regPath -Name "EnableMDMEnrollment" -Value 1 -PropertyType DWORD -Force | Out-Null
+        Write-Host "✓" -ForegroundColor Green
     }
     catch {
-        Write-Error "Error setting registry: $_"
+        Write-Host "✗" -ForegroundColor Red
+        Write-Host "Error setting registry: $_" -ForegroundColor Red
+        return $false
     }
-}
 
-# Install Company Portal for all users
-function Install-CompanyPortal {
     try {
-        # Using winget to install Company Portal silently
-        $env:PROGRAMDATA + "\Microsoft\Windows\Start Menu\Programs\StartUp"
-        winget install "Company Portal" --silent --scope machine --accept-package-agreements --accept-source-agreements
+        # Install Company Portal
+        Write-Host "Installing Company Portal..." -NoNewline
+        winget install "Company Portal" --silent --accept-package-agreements --accept-source-agreements | Out-Null
         
-        # Create shortcut in public desktop
-        $WshShell = New-Object -ComObject WScript.Shell
-        $Shortcut = $WshShell.CreateShortcut("C:\Users\Public\Desktop\Enroll Device.lnk")
-        $Shortcut.TargetPath = "ms-windows-store://pdp/?productid=9WZDNCRFJ3PZ"
-        $Shortcut.Description = "Enroll your device for required updates"
-        $Shortcut.Save()
+        # Verify installation
+        Start-Sleep -Seconds 5  # Give it a moment to complete
+        $cpInstalled = Get-AppxPackage -Name "Microsoft.CompanyPortal" -AllUsers
+        if ($cpInstalled) {
+            Write-Host "✓" -ForegroundColor Green
+        } else {
+            Write-Host "✗" -ForegroundColor Red
+            Write-Host "Company Portal not found after installation" -ForegroundColor Red
+            return $false
+        }
     }
     catch {
-        Write-Error "Error installing Company Portal: $_"
+        Write-Host "✗" -ForegroundColor Red
+        Write-Host "Error installing Company Portal: $_" -ForegroundColor Red
+        return $false
     }
+
+    return $true
 }
 
-# Create a scheduled task to remind users
-function Create-EnrollmentReminder {
+# Create enrollment reminder
+function Set-EnrollmentReminder {
+    Write-Host "`n=== Setting Up Reminders ===" -ForegroundColor Cyan
+    
     try {
-        # Create a scheduled task that runs for all users
+        # Create a scheduled task
+        Write-Host "Creating reminder task..." -NoNewline
+        
         $taskName = "DeviceEnrollmentReminder"
-        $taskDescription = "Reminder to complete device enrollment"
-        
-        # Delete existing task if it exists
+        # Remove existing task if present
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
         
-        # Create the task action
-        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" `
-            -Argument "-WindowStyle Hidden -Command Start-Process 'ms-windows-store://pdp/?productid=9WZDNCRFJ3PZ'"
+        $action = New-ScheduledTaskAction -Execute "ms-windows-store://pdp/?productid=9WZDNCRFJ3PZ"
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         
-        # Create triggers - at logon and every 4 hours
-        $logonTrigger = New-ScheduledTaskTrigger -AtLogOn
-        $repeatTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Hours 4)
-        
-        # Specify that task can run on battery and doesn't stop on battery
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-        
-        # Register the task to run for all users
-        Register-ScheduledTask -TaskName $taskName `
-            -Description $taskDescription `
-            -Trigger @($logonTrigger, $repeatTrigger) `
-            -Action $action `
-            -Settings $settings `
-            -Force
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings | Out-Null
+        Write-Host "✓" -ForegroundColor Green
     }
     catch {
-        Write-Error "Error creating reminder task: $_"
+        Write-Host "✗" -ForegroundColor Red
+        Write-Host "Error creating reminder: $_" -ForegroundColor Red
+        return $false
     }
+
+    return $true
 }
 
-# Main execution block
-$logPath = "$env:ProgramData\IntuneMigration.log"
-$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+# Main execution
+Write-Host "Starting Intune Enrollment Setup" -ForegroundColor Cyan
 
-try {
-    # Start logging
-    Add-Content -Path $logPath -Value "[$timestamp] Starting enrollment script"
-    
-    # Check if already domain joined
-    if (Check-DomainStatus) {
-        Add-Content -Path $logPath -Value "[$timestamp] Device is already domain/AAD joined. Exiting."
-        exit 0
-    }
-    
-    # Get interactive user
-    $currentUser = Get-InteractiveUser
-    Add-Content -Path $logPath -Value "[$timestamp] Current interactive user: $($currentUser.Username)"
-    
-    # Set registry values
-    Set-RegistryForAllUsers
-    Add-Content -Path $logPath -Value "[$timestamp] Registry values set"
-    
-    # Install Company Portal
-    Install-CompanyPortal
-    Add-Content -Path $logPath -Value "[$timestamp] Company Portal installation attempted"
-    
-    # Create reminder task
-    Create-EnrollmentReminder
-    Add-Content -Path $logPath -Value "[$timestamp] Reminder task created"
-    
-    Add-Content -Path $logPath -Value "[$timestamp] Script completed successfully"
+# Check if running as admin
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "Script must run with administrative privileges" -ForegroundColor Red
+    exit 1
 }
-catch {
-    Add-Content -Path $logPath -Value "[$timestamp] ERROR: $($_.Exception.Message)"
-    throw
+
+# Run checks
+if (-not (Test-Prerequisites)) {
+    Write-Host "`nPrerequisite checks failed - please resolve issues and try again" -ForegroundColor Red
+    exit 1
 }
+
+# Install prerequisites
+if (-not (Install-EnrollmentPrerequisites)) {
+    Write-Host "`nFailed to install prerequisites - please check errors above" -ForegroundColor Red
+    exit 1
+}
+
+# Set up reminders
+if (-not (Set-EnrollmentReminder)) {
+    Write-Host "`nFailed to set up reminders - please check errors above" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "`nSetup completed successfully!" -ForegroundColor Green
+Write-Host "The Company Portal will launch at next user login to complete enrollment" -ForegroundColor Cyan
