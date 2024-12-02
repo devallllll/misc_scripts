@@ -1,0 +1,27 @@
+#PSRAMChecker
+# Fetch memory details and format as a concise single line
+Get-CimInstance -ClassName Win32_PhysicalMemory | ForEach-Object {
+    $FormFactor = Switch ($_.FormFactor) {
+        8 { "UDIMM" }
+        12 { "SODIMM" }
+        Default { "Unknown($($_.FormFactor))" }
+    }
+    $DDRType = Switch ($_.SMBIOSMemoryType) {
+        26 { "DDR4" }
+        27 { "DDR5" }
+        Default { "Unknown($($_.SMBIOSMemoryType))" }
+    }
+    $Voltage = If ($_.ConfiguredVoltage -ne $null) {
+        "$($_.ConfiguredVoltage / 1000)V"
+    } Else {
+        "Unknown"
+    }
+    $Speed = If ($_.Speed -ne $null) { "$($_.Speed)MHz" } Else { "Unknown" }
+    $Capacity = If ($_.Capacity -ne $null) { "$($_.Capacity / 1GB)GB" } Else { "Unknown" }
+    $PartNumber = If ($_.PartNumber -ne $null) { $_.PartNumber } Else { "Unknown" }
+    $Manufacturer = If ($_.Manufacturer -ne $null) { $_.Manufacturer } Else { "Unknown" }
+    $BankLabel = If ($_.BankLabel -ne $null) { $_.BankLabel } Else { "Unknown" }
+
+    # Concise single-line output
+    "$BankLabel $FormFactor $DDRType $Speed $Voltage $Capacity $PartNumber $Manufacturer"
+}
