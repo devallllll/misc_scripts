@@ -1,0 +1,172 @@
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# Main form
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Dave's Windows 11 Unstupidifier"
+$form.Size = New-Object System.Drawing.Size(600,500)
+$form.StartPosition = "CenterScreen"
+$form.BackColor = [System.Drawing.Color]::FromArgb(240,240,240)
+$form.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Regular)
+
+# Title Label
+$titleLabel = New-Object System.Windows.Forms.Label
+$titleLabel.Location = New-Object System.Drawing.Point(20,20)
+$titleLabel.Size = New-Object System.Drawing.Size(540,30)
+$titleLabel.Text = "Dave's Windows 11 Unstupidifier"
+$titleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
+$titleLabel.ForeColor = [System.Drawing.Color]::FromArgb(0,99,177)
+$form.Controls.Add($titleLabel)
+
+# Subtitle Label
+$subtitleLabel = New-Object System.Windows.Forms.Label
+$subtitleLabel.Location = New-Object System.Drawing.Point(20,55)
+$subtitleLabel.Size = New-Object System.Drawing.Size(540,30)
+$subtitleLabel.Text = "Make Windows 11 Less Annoying!"
+$subtitleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Italic)
+$form.Controls.Add($subtitleLabel)
+
+# Create GroupBox for settings
+$groupBox = New-Object System.Windows.Forms.GroupBox
+$groupBox.Location = New-Object System.Drawing.Point(20,100)
+$groupBox.Size = New-Object System.Drawing.Size(540,250)
+$groupBox.Text = "Settings"
+$form.Controls.Add($groupBox)
+
+# Function to create checkboxes with descriptions
+function Add-SettingCheckBox {
+    param (
+        $y,
+        $text,
+        $description,
+        $checked
+    )
+    
+    $checkbox = New-Object System.Windows.Forms.CheckBox
+    $checkbox.Location = New-Object System.Drawing.Point(20,$y)
+    $checkbox.Size = New-Object System.Drawing.Size(500,20)
+    $checkbox.Text = $text
+    $checkbox.Checked = $checked
+    $groupBox.Controls.Add($checkbox)
+    
+    $descLabel = New-Object System.Windows.Forms.Label
+    $descLabel.Location = New-Object System.Drawing.Point(40,$y+20)
+    $descLabel.Size = New-Object System.Drawing.Size(480,30)
+    $descLabel.Text = $description
+    $descLabel.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Italic)
+    $descLabel.ForeColor = [System.Drawing.Color]::Gray
+    $groupBox.Controls.Add($descLabel)
+    
+    return $checkbox
+}
+
+# Add checkboxes with descriptions
+$chkDisableSearch = Add-SettingCheckBox 30 "Disable Internet Search in Start Menu" "Prevents Windows from searching the internet when you use the Start menu search" $true
+$chkStartBarLeft = Add-SettingCheckBox 80 "Move Start Menu to Left" "Returns the Start menu to its traditional left position instead of center" $true
+$chkHideWidget = Add-SettingCheckBox 130 "Hide News Widget" "Removes the News and Interests widget from the taskbar" $true
+$chkCurrentUser = Add-SettingCheckBox 180 "Current User Only" "Apply changes only to current user (recommended) instead of all users" $true
+
+# Add Apply Button
+$btnApply = New-Object System.Windows.Forms.Button
+$btnApply.Location = New-Object System.Drawing.Point(20,370)
+$btnApply.Size = New-Object System.Drawing.Size(120,30)
+$btnApply.Text = "Apply Changes"
+$btnApply.BackColor = [System.Drawing.Color]::FromArgb(0,99,177)
+$btnApply.ForeColor = [System.Drawing.Color]::White
+$btnApply.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$form.Controls.Add($btnApply)
+
+# Status Label
+$statusLabel = New-Object System.Windows.Forms.Label
+$statusLabel.Location = New-Object System.Drawing.Point(150,370)
+$statusLabel.Size = New-Object System.Drawing.Size(410,30)
+$statusLabel.Text = "Ready to apply changes..."
+$form.Controls.Add($statusLabel)
+
+# Registry modification functions
+function Test-AdminOrSystem {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    $isAdmin = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    $isSystem = $identity.Name -eq "NT AUTHORITY\SYSTEM"
+    return $isAdmin -or $isSystem
+}
+
+function Set-TaskbarRegistryValue {
+    param(
+        [string]$userHive,
+        [string]$userName,
+        [hashtable]$registryChanges
+    )
+
+    $regPath = "HKCU:"
+    
+    foreach ($change in $registryChanges.GetEnumerator()) {
+        $changePath = "$regPath\" + $change.Value.Path
+        $changeName = $change.Value.Key
+        $changeValue = $change.Value.Value
+        $changeType = $change.Value.Type
+
+        try {
+            if (-not (Test-Path $changePath)) {
+                New-Item -Path $changePath -Force | Out-Null
+            }
+            Set-ItemProperty -Path $changePath -Name $changeName -Value $changeValue -Type $changeType -Force
+            $statusLabel.Text += "`nApplied: $($change.Key)"
+        } catch {
+            $statusLabel.Text += "`nFailed to set $($changeName): $_"
+        }
+    }
+}
+
+# Apply Button Click Event
+$btnApply.Add_Click({
+    if (-not (Test-AdminOrSystem)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "This application requires administrative privileges to make changes.`nPlease run as administrator.",
+            "Administrator Rights Required",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        return
+    }
+
+    $statusLabel.Text = "Applying changes..."
+    
+    $changes = @{
+        "DisableSearch" = @{
+            Path = "SOFTWARE\Policies\Microsoft\Windows\Explorer"
+            Key = "DisableSearchBoxSuggestions"
+            Value = if ($chkDisableSearch.Checked) { 1 } else { 0 }
+            Type = "DWORD"
+        }
+        "StartBarOnLeft" = @{
+            Path = "SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            Key = "TaskbarAl"
+            Value = if ($chkStartBarLeft.Checked) { 1 } else { 0 }
+            Type = "DWORD"
+        }
+        "HideTaskbarWidget" = @{
+            Path = "SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            Key = "TaskbarDa"
+            Value = if ($chkHideWidget.Checked) { 1 } else { 0 }
+            Type = "DWORD"
+        }
+    }
+
+    Set-TaskbarRegistryValue -userHive $env:USERPROFILE -userName $env:USERNAME -registryChanges $changes
+
+    $statusLabel.Text += "`nChanges applied successfully! Please restart Explorer or your PC for changes to take effect."
+})
+
+# Version and Copyright
+$versionLabel = New-Object System.Windows.Forms.Label
+$versionLabel.Location = New-Object System.Drawing.Point(20,420)
+$versionLabel.Size = New-Object System.Drawing.Size(540,30)
+$versionLabel.Text = "Version 1.1 - © 2024 GoodChoice IT LTD"
+$versionLabel.Font = New-Object System.Drawing.Font("Segoe UI", 8, [System.Drawing.FontStyle]::Regular)
+$versionLabel.ForeColor = [System.Drawing.Color]::Gray
+$form.Controls.Add($versionLabel)
+
+# Show the form
+$form.ShowDialog()
