@@ -107,7 +107,7 @@ function Get-NetworkPrinters {
     # Get MAC addresses for discovered printers
     foreach ($ip in $discoveredPrinters.Keys) {
         try {
-            $arpResult = arp -a | Select-String -Pattern $ip
+            $arpResult = arp -a | Where-Object { $_ -match $ip }
             if ($arpResult -match "([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})") {
                 $discoveredPrinters[$ip].MACAddress = $matches[1]
                 
@@ -139,8 +139,7 @@ function Get-PrinterDetails {
     $printerDetails = @()
     $allPrinters = Get-Printer | Sort-Object Type, Name
     
-    # Get network printers
-    Write-Host "Discovering network printers... This may take a few moments."
+    # Get network printers silently
     $networkPrinters = Get-NetworkPrinters
     
     # Process configured printers
@@ -156,7 +155,13 @@ function Get-PrinterDetails {
         try {
             $driverInfo = Get-PrinterDriver -Name $printer.DriverName | Select-Object -Property *
             $driverVersion = if ($driverInfo.DriverVersion) {
-                $driverInfo.DriverVersion.ToString()
+                try {
+                    $major = [math]::Floor($driverInfo.DriverVersion / 1000000)
+                    $minor = $driverInfo.DriverVersion % 1000000
+                    "$major.$minor"
+                } catch {
+                    $driverInfo.DriverVersion.ToString()
+                }
             } elseif ($driverInfo.MajorVersion -or $driverInfo.MinorVersion) {
                 "$($driverInfo.MajorVersion).$($driverInfo.MinorVersion)"
             } else {
@@ -250,5 +255,24 @@ function Get-PrinterDetails {
 # Execute and format output
 $printerData = Get-PrinterDetails
 
-# Output results
-$printerData | Select-Object PrinterName, Manufacturer, Model, DriverVersion, IPAddress, MACAddress, DetectionMethod, OpenPorts, WebInterface, WebEndpoint | Format-Table -AutoSize
+# Get MAC addresses for configured printers
+foreach ($printer in $printerData) {
+    if ($printer.IPAddress -ne "---" -and $printer.IPAddress -ne "LOCAL") {
+        $arp = arp -a | Where-Object { $_ -match $printer.IPAddress }
+        if ($arp -match "([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})") {
+            $printer.MACAddress = $matches[1]
+        }
+    }
+}
+
+# Output the results
+$printerData | 
+    Sort-Object IPAddress -Unique | 
+    Select-Object @{N='Printer';E={$_.PrinterName}}, 
+                  @{N='IP';E={$_.IPAddress}}, 
+                  @{N='MAC';E={$_.MACAddress}}, 
+                  @{N='Model';E={$_.Model}}, 
+                  @{N='Driver Ver';E={$_.DriverVersion}}, 
+                  @{N='Detection';E={$_.DetectionMethod}}, 
+                  @{N='Ports';E={$_.OpenPorts}} |
+    Format-Table -AutoSize
