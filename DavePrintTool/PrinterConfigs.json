@@ -1,1 +1,61 @@
 
+{
+  "printers": {
+    "HP LaserJet 5000": {
+      "use_windows_update": true,
+      "manufacturer": "HP",
+      "model": "LaserJet 5000",
+      "install_method": "windows_update",
+      "ip_address": "192.168.1.10",
+      "features": {
+        "duplex": true,
+        "color": false,
+        "paper_size": "A4"
+      }
+    },
+    "Brother HL-L6200DW": {
+      "use_windows_update": false,
+      "manufacturer": "Brother",
+      "model": "HL-L6200DW",
+      "install_method": "manual",
+      "driver_url": "https://brother.com/drivers/hll6200dw.zip",
+      "silent_install_cmd": "setup.exe /silent",
+      "ip_address": "192.168.1.11",
+      "features": {
+        "duplex": true,
+        "color": false,
+        "paper_size": "A4"
+      }
+    },
+    "Canon MF743Cdw": {
+      "use_windows_update": false,
+      "manufacturer": "Canon",
+      "model": "MF743Cdw",
+      "install_method": "manual",
+      "driver_url": "https://canon.com/drivers/mf743cdw.exe",
+      "silent_install_cmd": "mf743cdw.exe /s /norestart",
+      "post_install_cmds": [
+        "sc config spooler start= auto",
+        "net start spooler",
+        "PrintUI.exe /if /b \"Canon MF743Cdw\" /f \"C:\\Drivers\\canon.inf\" /r \"192.168.1.12\" /m \"Canon MF743Cdw Driver\""
+      ],
+      "dependencies": [
+        "vcredist_x64.exe /quiet /norestart",
+        "dotnet-installer.exe /quiet /norestart"
+      ],
+      "ip_address": "192.168.1.12",
+      "features": {
+        "duplex": true,
+        "color": true,
+        "paper_size": "A4"
+      },
+      "scanner": {
+        "driver_url": "https://canon.com/scanner/mf743cdw.exe",
+        "silent_install_cmd": "mf743cdw_scan.exe /silent",
+        "scan_software_url": "https://canon.com/utilities/mfscanutility.exe",
+        "network_scan_setup_cmd": "CanonScanConfig.exe /ip 192.168.1.12 /set_network_scan",
+        "twain_wia": "WIA"
+      }
+    }
+  }
+}
