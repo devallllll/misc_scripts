@@ -20,11 +20,15 @@ function Get-NetworkPrinters {
                     if ($success) {
                         $tcpClient.EndConnect($asyncResult)
                         if (-not $discoveredPrinters.ContainsKey($ip)) {
-                            $printerInfo = @{
-                                DetectionMethod = "Port Scan"
+                            $discoveredPrinters[$ip] = @{
+                                IPAddress = $ip
                                 OpenPorts = @($port)
+                                DetectionMethod = "Port Scan"
+                                Name = "UNCONFIGURED"
+                                Model = "---"
+                                Manufacturer = "---"
+                                MACAddress = "---"
                             }
-                            $discoveredPrinters[$ip] = $printerInfo
                         } else {
                             $discoveredPrinters[$ip].OpenPorts += $port
                         }
@@ -38,50 +42,31 @@ function Get-NetworkPrinters {
         }
     }
 
-    # Method 2: Windows Print Server Discovery
-    try {
-        Get-PrinterPort | Where-Object { $_.Description -eq "Standard TCP/IP Port" } | ForEach-Object {
-            $ip = $_.PrinterHostAddress
-            if ($ip -and -not $discoveredPrinters.ContainsKey($ip)) {
-                $printerInfo = @{
-                    DetectionMethod = "Windows Print Server"
-                    PrinterPort = $_.Name
+    # Method 2: Get MAC addresses and manufacturer info
+    foreach ($ip in $discoveredPrinters.Keys) {
+        try {
+            $arp = arp -a | Where-Object { $_ -match $ip }
+            if ($arp -match "([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})") {
+                $mac = $matches[1].Replace('-','').Replace(':','').ToLower()
+                $discoveredPrinters[$ip].MACAddress = $mac
+                
+                # Check MAC prefix for manufacturer
+                $macPrefix = $mac.Substring(0,6)
+                $discoveredPrinters[$ip].Manufacturer = switch ($macPrefix) {
+                    "0017c8" { "HP" }
+                    "008077" { "Brother" }
+                    "080037" { "Xerox" }
+                    "000074" { "Ricoh" }
+                    "002673" { "Epson" }
+                    "000085" { "Canon" }
+                    default { "---" }
                 }
-                $discoveredPrinters[$ip] = $printerInfo
             }
         }
+        catch {}
     }
-    catch {}
 
-    # Method 3: WSD (Web Services for Devices) Discovery
-    try {
-        $wsdSearch = New-Object -ComObject WSDDiscovery.WSDDiscoveryPublisher
-        $wsdSearch.SearchById("urn:schemas-microsoft-com:device:PrintDeviceType:1")
-        Start-Sleep -Seconds 2 # Give time for responses
-        if (-not $discoveredPrinters.ContainsKey($ip)) {
-            $printerInfo = @{
-                DetectionMethod = "WSD"
-            }
-            $discoveredPrinters[$ip] = $printerInfo
-        }
-    }
-    catch {}
-
-    # Method 4: mDNS/Bonjour Discovery (IPP)
-    try {
-        $ipps = [System.Net.Dns]::GetHostEntry("_ipp._tcp.local")
-        foreach ($address in $ipps.AddressList) {
-            if (-not $discoveredPrinters.ContainsKey($address.ToString())) {
-                $printerInfo = @{
-                    DetectionMethod = "mDNS/Bonjour"
-                }
-                $discoveredPrinters[$address.ToString()] = $printerInfo
-            }
-        }
-    }
-    catch {}
-
-    # Method 5: Check for common printer HTTP endpoints
+    # Method 3: Check web interfaces for additional info
     $webEndpoints = @("/", "/hp/device/info", "/web/info.html", "/printer", "/Printer", "/status.html")
     foreach ($ip in $discoveredPrinters.Keys) {
         foreach ($endpoint in $webEndpoints) {
@@ -93,10 +78,8 @@ function Get-NetworkPrinters {
                 $reader = New-Object System.IO.StreamReader($stream)
                 $content = $reader.ReadToEnd()
                 
-                # Look for printer-specific keywords in response
                 if ($content -match "printer|copier|scanner|HP|Epson|Canon|Xerox|Brother|Lexmark") {
                     $discoveredPrinters[$ip].WebInterface = $true
-                    $discoveredPrinters[$ip].WebEndpoint = $endpoint
                     break
                 }
             }
@@ -104,175 +87,115 @@ function Get-NetworkPrinters {
         }
     }
 
-    # Get MAC addresses for discovered printers
-    foreach ($ip in $discoveredPrinters.Keys) {
-        try {
-            $arpResult = arp -a | Where-Object { $_ -match $ip }
-            if ($arpResult -match "([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})") {
-                $discoveredPrinters[$ip].MACAddress = $matches[1]
-                
-                # Check MAC address prefixes against known printer manufacturers
-                $macPrefix = ($matches[1] -split '[:-]')[0..2] -join ':'
-                $discoveredPrinters[$ip].PossibleManufacturer = switch -Wildcard ($macPrefix.ToUpper()) {
-                    "00:17:C8" { "HP" }
-                    "00:80:77" { "Brother" }
-                    "08:00:37" { "Xerox" }
-                    "00:00:74" { "Ricoh" }
-                    "00:26:73" { "Epson" }
-                    "00:00:85" { "Canon" }
-                    default { "---" }
-                }
-            }
-        }
-        catch {}
-    }
-
     return $discoveredPrinters
 }
 
-# Main printer information collection function
-function Get-PrinterDetails {
+function Get-PrinterInfo {
     [CmdletBinding()]
     param()
     
-    # Get configured printers
-    $printerDetails = @()
-    $allPrinters = Get-Printer | Sort-Object Type, Name
+    # First get all network printers
+    $allPrinters = Get-NetworkPrinters
     
-    # Get network printers silently
-    $networkPrinters = Get-NetworkPrinters
+    # Now get all installed printers
+    $installedPrinters = Get-Printer | Sort-Object Type, Name
     
-    # Process configured printers
-    foreach ($printer in $allPrinters) {
-        $printerName = $printer.Name
-        $printerType = $printer.Type
-        $printerMake = if ($printer.Manufacturer) { $printer.Manufacturer } else { "---" }
-        $printerModel = if ($printer.DriverName) { $printer.DriverName } else { "---" }
-        $printerPortName = $printer.PortName
-        $printerShared = $printer.Shared
-        
-        # Get detailed driver information
-        try {
-            $driverInfo = Get-PrinterDriver -Name $printer.DriverName | Select-Object -Property *
-            $driverVersion = if ($driverInfo.DriverVersion) {
-                try {
-                    $major = [math]::Floor($driverInfo.DriverVersion / 1000000)
-                    $minor = $driverInfo.DriverVersion % 1000000
-                    "$major.$minor"
-                } catch {
-                    $driverInfo.DriverVersion.ToString()
-                }
-            } elseif ($driverInfo.MajorVersion -or $driverInfo.MinorVersion) {
-                "$($driverInfo.MajorVersion).$($driverInfo.MinorVersion)"
-            } else {
-                "---"
-            }
-        }
-        catch {
-            $driverVersion = "---"
+    # Update network printer info with installed printer details
+    foreach ($printer in $installedPrinters) {
+        $portInfo = Get-PrinterPort -Name $printer.PortName -ErrorAction SilentlyContinue
+        $ip = if ($portInfo.PrinterHostAddress) {
+            $portInfo.PrinterHostAddress
+        } elseif ($printer.PortName -match "^(TCP|IP)_(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})") {
+            $matches[2]
+        } else {
+            "LOCAL"
         }
         
-        # Get port info including IP address
-        try {
-            $portInfo = Get-PrinterPort -Name $printerPortName -ErrorAction SilentlyContinue
-            $ipAddress = $portInfo.PrinterHostAddress
-            
-            if ([string]::IsNullOrEmpty($ipAddress) -and $printerPortName -match "^(TCP|IP)_") {
-                $ipAddress = $printerPortName -replace "^(TCP|IP)_", ""
-            }
-            
-            if ([string]::IsNullOrEmpty($ipAddress)) {
-                if ($printerPortName -match "^(COM|LPT)") {
-                    $ipAddress = "LOCAL"
+        # If this is a network printer we discovered
+        if ($ip -ne "LOCAL" -and $allPrinters.ContainsKey($ip)) {
+            # Get driver information
+            try {
+                $driverInfo = Get-PrinterDriver -Name $printer.DriverName | Select-Object -Property *
+                $driverVersion = if ($driverInfo.DriverVersion) {
+                    try {
+                        $major = [math]::Floor($driverInfo.DriverVersion / 1000000)
+                        $minor = $driverInfo.DriverVersion % 1000000
+                        "$major.$minor"
+                    } catch {
+                        "---"
+                    }
                 } else {
-                    $ipAddress = "---"
+                    "---"
+                }
+                
+                # Update discovered printer with installed printer info
+                $allPrinters[$ip].Name = $printer.Name
+                $allPrinters[$ip].Model = $printer.DriverName
+                $allPrinters[$ip].DriverName = "$($driverInfo.Name) $driverVersion"
+                $allPrinters[$ip].DriverPath = $driverInfo.Path
+                $allPrinters[$ip].DriverVersion = $driverVersion
+                # Keep existing MAC and detection method if we found it
+                if ($allPrinters[$ip].DetectionMethod -ne "Windows Config") {
+                    $allPrinters[$ip].DetectionMethod += ", Windows Config"
                 }
             }
+            catch {}
         }
-        catch {
-            $ipAddress = "---"
-        }
-        
-        # Create custom object for this printer
-        $printerInfo = [PSCustomObject]@{
-            PrinterName = $printerName
-            Type = $printerType
-            Manufacturer = $printerMake
-            Model = $printerModel
-            DriverVersion = $driverVersion
-            PortName = $printerPortName
-            IPAddress = $ipAddress
-            MACAddress = "---"
-            DetectionMethod = "Windows Config"
-            OpenPorts = "---"
-            Shared = $printerShared
-        }
-        
-        $printerDetails += $printerInfo
-    }
-    
-    # Add discovered network printers that aren't configured
-    foreach ($netPrinter in $networkPrinters.GetEnumerator()) {
-        if (-not ($printerDetails | Where-Object { $_.IPAddress -eq $netPrinter.Key })) {
-            $manufacturer = if ($netPrinter.Value.PossibleManufacturer) {
-                $netPrinter.Value.PossibleManufacturer
-            } else {
-                "---"
+        # If this is a network printer we didn't discover
+        elseif ($ip -ne "LOCAL") {
+            try {
+                $driverInfo = Get-PrinterDriver -Name $printer.DriverName | Select-Object -Property *
+                $driverVersion = if ($driverInfo.DriverVersion) {
+                    try {
+                        $major = [math]::Floor($driverInfo.DriverVersion / 1000000)
+                        $minor = $driverInfo.DriverVersion % 1000000
+                        "$major.$minor"
+                    } catch {
+                        "---"
+                    }
+                } else {
+                    "---"
+                }
+                
+                # Add to our collection
+                $allPrinters[$ip] = @{
+                    IPAddress = $ip
+                    Name = $printer.Name
+                    Model = $printer.DriverName
+                    Manufacturer = if ($printer.Manufacturer) { $printer.Manufacturer } else { "---" }
+                    DriverName = "$($driverInfo.Name) $driverVersion"
+                    DriverPath = $driverInfo.Path
+                    DriverVersion = $driverVersion
+                    DetectionMethod = "Windows Config Only"
+                    MACAddress = "---"
+                    OpenPorts = "---"
+                }
+                
+                # Try to get MAC address
+                $arp = arp -a | Where-Object { $_ -match $ip }
+                if ($arp -match "([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})") {
+                    $allPrinters[$ip].MACAddress = $matches[1].Replace('-','').Replace(':','').ToLower()
+                }
             }
-            
-            $macAddress = if ($netPrinter.Value.MACAddress) {
-                $netPrinter.Value.MACAddress
-            } else {
-                "---"
-            }
-            
-            $openPorts = if ($netPrinter.Value.OpenPorts) {
-                $netPrinter.Value.OpenPorts -join ", "
-            } else {
-                "---"
-            }
-            
-            $printerInfo = [PSCustomObject]@{
-                PrinterName = "UNCONFIGURED"
-                Type = "Network"
-                Manufacturer = $manufacturer
-                Model = "---"
-                DriverVersion = "---"
-                PortName = "---"
-                IPAddress = $netPrinter.Key
-                MACAddress = $macAddress
-                DetectionMethod = $netPrinter.Value.DetectionMethod
-                OpenPorts = $openPorts
-                Shared = $false
-            }
-            $printerDetails += $printerInfo
+            catch {}
         }
     }
-    
-    return $printerDetails
+
+    # Convert to output objects
+    $results = foreach ($printer in $allPrinters.Values) {
+        [PSCustomObject]@{
+            'Printer Name' = $printer.Name
+            'IP Address' = $printer.IPAddress
+            'MAC Address' = $printer.MACAddress
+            'Model' = $printer.Model
+            'Driver' = $printer.DriverName
+            'Detection' = $printer.DetectionMethod
+            'Ports' = if ($printer.OpenPorts) { $printer.OpenPorts -join ', ' } else { "---" }
+        }
+    }
+
+    return $results | Sort-Object 'IP Address'
 }
 
-# Execute and format output
-$printerData = Get-PrinterDetails
-
-# Get MAC addresses for configured printers
-foreach ($printer in $printerData) {
-    if ($printer.IPAddress -ne "---" -and $printer.IPAddress -ne "LOCAL") {
-        $arp = arp -a | Where-Object { $_ -match $printer.IPAddress }
-        if ($arp -match "([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})") {
-            $printer.MACAddress = $matches[1]
-        }
-    }
-}
-
-# Output the results
-$printerData | 
-    Sort-Object IPAddress -Unique | 
-    Select-Object @{N='Printer';E={$_.PrinterName}}, 
-                  @{N='IP';E={$_.IPAddress}}, 
-                  @{N='MAC';E={$_.MACAddress}}, 
-                  @{N='Model';E={$_.Model}}, 
-                  @{N='Driver Ver';E={$_.DriverVersion}}, 
-                  @{N='Detection';E={$_.DetectionMethod}}, 
-                  @{N='Ports';E={$_.OpenPorts}} |
-    Format-Table -AutoSize
+# Execute and display results
+Get-PrinterInfo | Format-Table -AutoSize
