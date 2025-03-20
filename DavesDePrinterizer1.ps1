@@ -1,4 +1,4 @@
-# Printer Manager GUI
+$form.Controls.Add($updateDriversButton)# Printer Manager GUI
 # Lists all printers (system and user) with checkboxes for selective removal
 # Run as administrator
 
@@ -167,6 +167,10 @@ function Remove-SelectedPrinters {
         return
     }
     
+    # Ask about removing associated ports and drivers
+    $removePortsChecked = $removePortsCheckbox.Checked
+    $removeDriversChecked = $removeDriversCheckbox.Checked
+    
     $result = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to remove $($selectedItems.Count) selected printer(s)?", "Confirm Removal", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
     
     if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
@@ -183,9 +187,14 @@ function Remove-SelectedPrinters {
         $progressBar.Left = $ListView.Left
         $form.Controls.Add($progressBar)
         
+        # Track printer ports and drivers to remove
+        $portsToRemove = @()
+        $driversToRemove = @()
+        
         foreach ($item in $selectedItems) {
             $printerName = $item.Text
             $printerType = $item.SubItems[1].Text
+            $portName = $item.SubItems[2].Text
             
             # Update status label
             $statusLabel.Text = "Removing: $printerName"
@@ -211,6 +220,19 @@ function Remove-SelectedPrinters {
             else {
                 # System printer
                 try {
+                    # Record port name for later removal if it's a network port
+                    if ($removePortsChecked -and $portName -match '^(IP_|\\\\)' -and $portName -notmatch "PDF|txt|fax|usb|enhanced|epson|microsoft") {
+                        $portsToRemove += $portName
+                    }
+                    
+                    # Get driver name for later removal
+                    if ($removeDriversChecked) {
+                        $driver = (Get-Printer -Name $printerName -ErrorAction SilentlyContinue).DriverName
+                        if ($driver) {
+                            $driversToRemove += $driver
+                        }
+                    }
+                    
                     Remove-Printer -Name $printerName -ErrorAction Stop
                     $successCount++
                 }
@@ -225,37 +247,65 @@ function Remove-SelectedPrinters {
             $progressBar.PerformStep()
         }
         
-        # After removal operations, restart the Print Spooler service
+        # Remove printer ports if requested
+        if ($removePortsChecked -and $portsToRemove.Count -gt 0) {
+            $statusLabel.Text = "Removing printer ports..."
+            $form.Refresh()
+            
+            # Make ports unique
+            $portsToRemove = $portsToRemove | Select-Object -Unique
+            
+            foreach ($port in $portsToRemove) {
+                try {
+                    Remove-PrinterPort -Name $port -ErrorAction SilentlyContinue
+                }
+                catch {
+                    # Just continue if port removal fails
+                }
+            }
+        }
+        
+        # Remove printer drivers if requested
+        if ($removeDriversChecked -and $driversToRemove.Count -gt 0) {
+            $statusLabel.Text = "Removing printer drivers..."
+            $form.Refresh()
+            
+            # Make drivers unique
+            $driversToRemove = $driversToRemove | Select-Object -Unique
+            
+            foreach ($driver in $driversToRemove) {
+                try {
+                    Remove-PrinterDriver -Name $driver -ErrorAction SilentlyContinue
+                }
+                catch {
+                    # Just continue if driver removal fails
+                }
+            }
+        }
+        
+        # Simple restart of the Print Spooler service
         $statusLabel.Text = "Restarting Print Spooler service..."
         $form.Refresh()
         
         try {
-            # Stop and restart the Print Spooler service
-            Stop-Service -Name "Spooler" -Force -ErrorAction Stop
-            Start-Sleep -Seconds 2
-            Start-Service -Name "Spooler" -ErrorAction Stop
-            
-            # Create a countdown timer for visual feedback
-            for ($i = 5; $i -gt 0; $i--) {
-                $statusLabel.Text = "Print Spooler restarted. Refreshing printer list in $i seconds..."
-                $form.Refresh()
-                Start-Sleep -Seconds 1
-            }
-            
-            # Refresh printer list
-            $ListView.Items.Clear()
-            $script:SystemPrinters = @()
-            $script:UserPrinters = @()
-            Populate-PrinterList -ListView $ListView
-            
-            $form.Controls.Remove($progressBar)
-            $statusLabel.Text = "Removal complete: $successCount succeeded, $failCount failed. Print Spooler service restarted."
+            Restart-Service -Name "Spooler" -Force -ErrorAction Stop
+            Start-Sleep -Seconds 5  # Simple wait for 5 seconds
         }
         catch {
-            $form.Controls.Remove($progressBar)
-            $statusLabel.Text = "Printer removal completed but failed to restart Print Spooler: $($_.Exception.Message)"
-            [System.Windows.Forms.MessageBox]::Show("Failed to restart Print Spooler service: $($_.Exception.Message)", "Warning", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            $statusLabel.Text = "Failed to restart Print Spooler service. You may need to restart it manually."
         }
+        
+        # Refresh printer list
+        $ListView.Items.Clear()
+        $script:SystemPrinters = @()
+        $script:UserPrinters = @()
+        Populate-PrinterList -ListView $ListView
+        
+        if ($progressBar -ne $null -and $form.Controls.Contains($progressBar)) {
+            $form.Controls.Remove($progressBar)
+        }
+        
+        $statusLabel.Text = "Removal complete: $successCount succeeded, $failCount failed."
     }
 }
 
@@ -355,7 +405,7 @@ $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $form.MaximizeBox = $false
 
-# Create checkbox for selecting all printers
+# Create checkboxes for various options
 $selectAllCheckbox = New-Object System.Windows.Forms.CheckBox
 $selectAllCheckbox.Text = "Select All"
 $selectAllCheckbox.Location = New-Object System.Drawing.Point(10, 10)
@@ -367,7 +417,6 @@ $selectAllCheckbox.Add_CheckedChanged({
 })
 $form.Controls.Add($selectAllCheckbox)
 
-# Create checkbox for selecting all network printers
 $selectNetworkCheckbox = New-Object System.Windows.Forms.CheckBox
 $selectNetworkCheckbox.Text = "Select Network Only"
 $selectNetworkCheckbox.Location = New-Object System.Drawing.Point(120, 10)
@@ -387,19 +436,106 @@ $selectNetworkCheckbox.Add_CheckedChanged({
 })
 $form.Controls.Add($selectNetworkCheckbox)
 
-# Create refresh button
-$refreshButton = New-Object System.Windows.Forms.Button
-$refreshButton.Location = New-Object System.Drawing.Point(280, 8)
-$refreshButton.Size = New-Object System.Drawing.Size(100, 25)
-$refreshButton.Text = "Refresh List"
-$refreshButton.Add_Click({
-    $script:SystemPrinters = @()
-    $script:UserPrinters = @()
-    $selectAllCheckbox.Checked = $false
-    $selectNetworkCheckbox.Checked = $false
-    Populate-PrinterList -ListView $listView
+# Add checkbox for removing printer ports
+$removePortsCheckbox = New-Object System.Windows.Forms.CheckBox
+$removePortsCheckbox.Text = "Remove Printer Ports"
+$removePortsCheckbox.Location = New-Object System.Drawing.Point(280, 10)
+$removePortsCheckbox.Size = New-Object System.Drawing.Size(150, 20)
+$form.Controls.Add($removePortsCheckbox)
+
+# Add checkbox for removing printer drivers
+$removeDriversCheckbox = New-Object System.Windows.Forms.CheckBox
+$removeDriversCheckbox.Text = "Remove Printer Drivers"
+$removeDriversCheckbox.Location = New-Object System.Drawing.Point(440, 10)
+$removeDriversCheckbox.Size = New-Object System.Drawing.Size(170, 20)
+$form.Controls.Add($removeDriversCheckbox)
+
+# Create update drivers button
+$updateDriversButton = New-Object System.Windows.Forms.Button
+$updateDriversButton.Location = New-Object System.Drawing.Point(730, 8)
+$updateDriversButton.Size = New-Object System.Drawing.Size(150, 25)
+$updateDriversButton.Text = "Update Printer Drivers"
+$updateDriversButton.BackColor = [System.Drawing.Color]::LightBlue
+$updateDriversButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$updateDriversButton.Add_Click({
+    $updateResult = [System.Windows.Forms.MessageBox]::Show(
+        "This will search Windows Update for printer drivers and may take 5+ minutes to complete.`n`nContinue?", 
+        "Update Printer Drivers", 
+        [System.Windows.Forms.MessageBoxButtons]::YesNo, 
+        [System.Windows.Forms.MessageBoxIcon]::Warning)
+        
+    if ($updateResult -eq [System.Windows.Forms.DialogResult]::Yes) {
+        $statusLabel.Text = "Updating printer drivers from Windows Update. This may take several minutes..."
+        $form.Refresh()
+        
+        # Create a progress window
+        $progressForm = New-Object System.Windows.Forms.Form
+        $progressForm.Text = "Updating Printer Drivers"
+        $progressForm.Size = New-Object System.Drawing.Size(400, 150)
+        $progressForm.StartPosition = "CenterScreen"
+        $progressForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+        $progressForm.MaximizeBox = $false
+        
+        $progressLabel = New-Object System.Windows.Forms.Label
+        $progressLabel.Location = New-Object System.Drawing.Point(10, 20)
+        $progressLabel.Size = New-Object System.Drawing.Size(360, 40)
+        $progressLabel.Text = "Searching Windows Update for printer drivers...`nThis may take 5+ minutes to complete."
+        $progressForm.Controls.Add($progressLabel)
+        
+        $cancelButton = New-Object System.Windows.Forms.Button
+        $cancelButton.Location = New-Object System.Drawing.Point(150, 70)
+        $cancelButton.Size = New-Object System.Drawing.Size(100, 30)
+        $cancelButton.Text = "Close"
+        $cancelButton.Add_Click({ $progressForm.Close() })
+        $progressForm.Controls.Add($cancelButton)
+        
+        # Start the update process in the background
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.ApartmentState = "STA"
+        $runspace.ThreadOptions = "ReuseThread"
+        $runspace.Open()
+        
+        $updateScript = {
+            $drivers = Get-PrinterDriver
+            
+            # Command to update drivers via Windows Update
+            # This can be done via an elevated PowerShell command
+            $updateCommand = "pnputil.exe /scan-devices"
+            $updateProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-Command $updateCommand" -Verb RunAs -PassThru
+            $updateProcess.WaitForExit()
+            
+            # Another option is to use Windows Update directly
+            $windowsUpdateCommand = "wuauclt.exe /detectnow /updatenow"
+            $updateProcess = Start-Process -FilePath "powershell.exe" -ArgumentList "-Command $windowsUpdateCommand" -Verb RunAs -PassThru
+            $updateProcess.WaitForExit()
+        }
+        
+        $psCmd = [powershell]::Create().AddScript($updateScript)
+        $psCmd.Runspace = $runspace
+        
+        # Show progress form before starting the task
+        $progressForm.Show()
+        
+        # Start the task
+        $handle = $psCmd.BeginInvoke()
+        
+        # When the form closes, we should clean up
+        $progressForm.Add_FormClosed({
+            if (-not $handle.IsCompleted) {
+                # The user closed the form before the task completed
+                # We'll let the task continue in the background
+                $statusLabel.Text = "Driver update running in the background. Please wait before making changes."
+            } else {
+                $statusLabel.Text = "Printer driver update completed."
+                # Refresh the printer list
+                $script:SystemPrinters = @()
+                $script:UserPrinters = @()
+                Populate-PrinterList -ListView $listView
+            }
+        })
+    }
 })
-$form.Controls.Add($refreshButton)
+$form.Controls.Add($updateDriversButton)
 
 # Create ListView
 $listView = New-Object System.Windows.Forms.ListView
