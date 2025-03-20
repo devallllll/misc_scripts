@@ -225,14 +225,37 @@ function Remove-SelectedPrinters {
             $progressBar.PerformStep()
         }
         
-        # Refresh printer list
-        $ListView.Items.Clear()
-        $script:SystemPrinters = @()
-        $script:UserPrinters = @()
-        Populate-PrinterList -ListView $ListView
+        # After removal operations, restart the Print Spooler service
+        $statusLabel.Text = "Restarting Print Spooler service..."
+        $form.Refresh()
         
-        $form.Controls.Remove($progressBar)
-        $statusLabel.Text = "Removal complete: $successCount succeeded, $failCount failed"
+        try {
+            # Stop and restart the Print Spooler service
+            Stop-Service -Name "Spooler" -Force -ErrorAction Stop
+            Start-Sleep -Seconds 2
+            Start-Service -Name "Spooler" -ErrorAction Stop
+            
+            # Create a countdown timer for visual feedback
+            for ($i = 5; $i -gt 0; $i--) {
+                $statusLabel.Text = "Print Spooler restarted. Refreshing printer list in $i seconds..."
+                $form.Refresh()
+                Start-Sleep -Seconds 1
+            }
+            
+            # Refresh printer list
+            $ListView.Items.Clear()
+            $script:SystemPrinters = @()
+            $script:UserPrinters = @()
+            Populate-PrinterList -ListView $ListView
+            
+            $form.Controls.Remove($progressBar)
+            $statusLabel.Text = "Removal complete: $successCount succeeded, $failCount failed. Print Spooler service restarted."
+        }
+        catch {
+            $form.Controls.Remove($progressBar)
+            $statusLabel.Text = "Printer removal completed but failed to restart Print Spooler: $($_.Exception.Message)"
+            [System.Windows.Forms.MessageBox]::Show("Failed to restart Print Spooler service: $($_.Exception.Message)", "Warning", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        }
     }
 }
 
@@ -288,10 +311,39 @@ function Populate-PrinterList {
     $statusLabel.Text = "Found $totalCount total printers ($($allSystemPrinters.Count) system, $($allUserPrinters.Count) user)"
 }
 
-# Check if running as administrator
+# Check if running as administrator - This is performed right at script start
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    [System.Windows.Forms.MessageBox]::Show("This application requires administrator privileges. Please run as administrator.", "Admin Required", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    # Display more prominent warning about admin privileges
+    $warnForm = New-Object System.Windows.Forms.Form
+    $warnForm.Text = "ADMINISTRATOR PRIVILEGES REQUIRED"
+    $warnForm.Size = New-Object System.Drawing.Size(500, 200)
+    $warnForm.StartPosition = "CenterScreen"
+    $warnForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $warnForm.MaximizeBox = $false
+    $warnForm.BackColor = [System.Drawing.Color]::LightYellow
+    
+    $warnIcon = New-Object System.Windows.Forms.PictureBox
+    $warnIcon.Location = New-Object System.Drawing.Point(20, 20)
+    $warnIcon.Size = New-Object System.Drawing.Size(48, 48)
+    $warnIcon.Image = [System.Drawing.SystemIcons]::Warning.ToBitmap()
+    $warnForm.Controls.Add($warnIcon)
+    
+    $warnLabel = New-Object System.Windows.Forms.Label
+    $warnLabel.Location = New-Object System.Drawing.Point(80, 20)
+    $warnLabel.Size = New-Object System.Drawing.Size(390, 80)
+    $warnLabel.Text = "This application requires administrator privileges to manage printers.`n`nPlease close this window and run the script again by right-clicking and selecting 'Run as administrator'."
+    $warnLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $warnForm.Controls.Add($warnLabel)
+    
+    $closeButton = New-Object System.Windows.Forms.Button
+    $closeButton.Location = New-Object System.Drawing.Point(200, 120)
+    $closeButton.Size = New-Object System.Drawing.Size(100, 30)
+    $closeButton.Text = "Close"
+    $closeButton.Add_Click({ $warnForm.Close() })
+    $warnForm.Controls.Add($closeButton)
+    
+    [void]$warnForm.ShowDialog()
     exit
 }
 
@@ -381,6 +433,8 @@ $removeButton = New-Object System.Windows.Forms.Button
 $removeButton.Location = New-Object System.Drawing.Point(750, 630)
 $removeButton.Size = New-Object System.Drawing.Size(100, 25)
 $removeButton.Text = "Remove Selected"
+$removeButton.BackColor = [System.Drawing.Color]::LightCoral
+$removeButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $removeButton.Add_Click({
     Remove-SelectedPrinters -ListView $listView
 })
