@@ -55,19 +55,52 @@ function Install-Chocolatey {
 }
 
 function Remove-IncompatibleApps {
-  # Check for incompatible products (including old DCU versions that need upgrading)
-  $IncompatibleApps = Get-InstalledApps -DisplayNames 'Dell Update', 'Dell Command | Update', 'Dell SupportAssist'
+  # Stop SupportAssist processes first (not services)
+  $ProcessesToStop = @(
+    'SupportAssistClientUI',
+    'SupportAssistAgent',
+    'DellClientManagementService'
+  )
   
-  # Filter out current versions we want to keep (5.0+)
+  foreach ($ProcessName in $ProcessesToStop) {
+    $Process = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
+    if ($Process) {
+      Write-Output "Stopping process: $ProcessName"
+      try {
+        $Process | Stop-Process -Force -ErrorAction Stop
+        Write-Output "Successfully stopped $ProcessName"
+      }
+      catch {
+        Write-Warning "Failed to stop process $ProcessName: $_"
+      }
+    }
+  }
+
+  # Check for incompatible products using both methods
+  # Use registry method for SupportAssist (more reliable)
+  $SupportAssistApps = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' | 
+    Where-Object { $_.DisplayName -like '*SupportAssist*' }
+  
+  # Use existing method for Dell Update variants
+  $DellUpdateApps = Get-InstalledApps -DisplayNames 'Dell Update', 'Dell Command | Update'
+  
+  # Combine all apps to remove
   $AppsToRemove = @()
-  foreach ($App in $IncompatibleApps) {
+  
+  # Add all SupportAssist variants
+  foreach ($App in $SupportAssistApps) {
+    $AppsToRemove += $App
+  }
+  
+  # Filter Dell Update apps (keep DCU 5.0+)
+  foreach ($App in $DellUpdateApps) {
     if ($App.DisplayName -like '*Dell Command | Update*') {
       # Check version - remove if less than 5.0.0
       if ($App.DisplayVersion -and [version]$App.DisplayVersion -lt [version]'5.0.0') {
         $AppsToRemove += $App
       }
     } else {
-      # Remove all other Dell Update variants and SupportAssist
+      # Remove all other Dell Update variants
       $AppsToRemove += $App
     }
   }
@@ -84,9 +117,8 @@ function Remove-IncompatibleApps {
       Write-Output "Successfully removed $($App.DisplayName)"
     }
     catch { 
-      Write-Warning "Failed to remove $($App.DisplayName)"
-      Write-Warning $_
-      exit 1
+      Write-Warning "Failed to remove $($App.DisplayName): $_"
+      # Don't exit - continue with installation even if removal fails
     }
   }
 }
@@ -142,7 +174,7 @@ if ($Manufacturer -notlike '*Dell*') {
 
 Write-Output "Dell system detected. Manufacturer: $Manufacturer"
 
-# Remove old/incompatible DCU versions
+# Remove old/incompatible apps and SupportAssist bloatware
 Remove-IncompatibleApps
 
 # Install latest DCU via Chocolatey
