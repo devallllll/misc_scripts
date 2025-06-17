@@ -56,8 +56,7 @@ function Install-Chocolatey {
 
 function Remove-IncompatibleApps {
   # Check for incompatible products (including old DCU versions that need upgrading)
-  $IncompatibleApps = Get-InstalledApps -DisplayNames 'Dell Update', 'Dell Command | Update' `
-    -Exclude 'Dell SupportAssist OS Recovery Plugin for Dell Update'
+  $IncompatibleApps = Get-InstalledApps -DisplayNames 'Dell Update', 'Dell Command | Update', 'Dell SupportAssist'
   
   # Filter out current versions we want to keep (5.0+)
   $AppsToRemove = @()
@@ -68,7 +67,7 @@ function Remove-IncompatibleApps {
         $AppsToRemove += $App
       }
     } else {
-      # Remove all other Dell Update variants
+      # Remove all other Dell Update variants and SupportAssist
       $AppsToRemove += $App
     }
   }
