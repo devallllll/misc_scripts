@@ -1,0 +1,163 @@
+# Global Variables
+$logFile = "C:\BitLockerScript.log"
+$tmprecoverykey = ""
+$lastError = ""
+
+# Function to write to log file
+function Write-Log {
+    param (
+        [string]$Message,
+        [string]$Level = 'Info'
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "$timestamp - [$Level] $Message"
+    Add-Content -Path $logFile -Value $logEntry
+    Write-Host $logEntry
+}
+
+# Function to check Azure AD join status
+function Check-AzureADStatus {
+    try {
+        $dsregStatus = & dsregcmd /status
+        $azureADJoined = ($dsregStatus | Select-String "AzureAdJoined\s*:\s*YES") -ne $null
+        $azureADRegistered = ($dsregStatus | Select-String "WorkplaceJoined\s*:\s*YES") -ne $null
+        
+        if ($azureADJoined) {
+            Write-Log "Device is Azure AD Joined."
+            return "Joined"
+        }
+        elseif ($azureADRegistered) {
+            Write-Log "Device is Azure AD Registered."
+            return "Registered"
+        }
+        else {
+            Write-Log "Device is not Azure AD joined or registered." -Level Warning
+            return "None"
+        }
+    }
+    catch {
+        Write-Log "Failed to check Azure AD status: $_" -Level Error
+        return "Unknown"
+    }
+}
+
+# Function to check BitLocker status and retrieve recovery key
+function Check-BitLockerStatusAndKey {
+    try {
+        $bitlockerStatus = Get-BitLockerVolume -MountPoint "C:"
+        Write-Log "Current BitLocker Status: $($bitlockerStatus.ProtectionStatus)"
+        Write-Log "Encryption Percentage: $($bitlockerStatus.EncryptionPercentage)%"
+        Write-Log "Volume Status: $($bitlockerStatus.VolumeStatus)"
+        
+        # Check for suspended state
+        $suspendedProtector = $bitlockerStatus.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'Tpm' -and $_.VolumeEncryptionState -eq 'EncryptionStateSuspended' }
+        
+        if ($suspendedProtector) {
+            Write-Log "BitLocker is currently suspended." -Level Warning
+        }
+        elseif ($bitlockerStatus.ProtectionStatus -eq 'On') {
+            Write-Log "BitLocker is enabled and active."
+        }
+        elseif ($bitlockerStatus.VolumeStatus -eq 'FullyDecrypted') {
+            Write-Log "BitLocker is not enabled on this drive."
+        }
+        elseif ($bitlockerStatus.VolumeStatus -eq 'EncryptionInProgress') {
+            Write-Log "BitLocker encryption is currently in progress."
+        }
+        elseif ($bitlockerStatus.ProtectionStatus -eq 'Off' -and $bitlockerStatus.VolumeStatus -eq 'FullyEncrypted') {
+            Write-Log "BitLocker is off, but the drive is encrypted. This is the Dell zombie state." -Level Warning
+            
+            # Fix the Dell half-enabled state
+            Write-Log "Attempting to fix Dell zombie BitLocker state..."
+            try {
+                # Check if TPM protector exists
+                $tpmProtector = $bitlockerStatus.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'Tpm' }
+                if (-not $tpmProtector) {
+                    Write-Log "Adding TPM protector..."
+                    Add-BitLockerKeyProtector -MountPoint "C:" -TpmProtector
+                }
+                
+                # Add recovery password if missing
+                $recoveryProtector = $bitlockerStatus.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'RecoveryPassword' }
+                if (-not $recoveryProtector) {
+                    Write-Log "Adding recovery password protector..."
+                    Add-BitLockerKeyProtector -MountPoint "C:" -RecoveryPasswordProtector
+                }
+                
+                # Resume/activate protection
+                Write-Log "Resuming BitLocker protection..."
+                Resume-BitLocker -MountPoint "C:"
+                
+                # Wait a moment for changes to take effect
+                Start-Sleep -Seconds 3
+                
+                # Re-check status
+                $bitlockerStatus = Get-BitLockerVolume -MountPoint "C:"
+                Write-Log "Updated Protection Status: $($bitlockerStatus.ProtectionStatus)"
+                
+                # Try to backup recovery key to Azure AD
+                try {
+                    $recoveryKey = $bitlockerStatus.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'RecoveryPassword' }
+                    if ($recoveryKey) {
+                        Write-Log "Attempting to backup recovery key to Azure AD..."
+                        BackupToAAD-BitLockerKeyProtector -MountPoint "C:" -KeyProtectorId $recoveryKey.KeyProtectorId
+                        Write-Log "Recovery key backed up to Azure AD successfully."
+                    }
+                }
+                catch {
+                    Write-Log "Failed to backup to Azure AD (this may be normal): $_" -Level Warning
+                }
+                
+            }
+            catch {
+                Write-Log "Failed to fix BitLocker state: $_" -Level Error
+                $script:lastError = "Failed to fix Dell zombie state: $_"
+            }
+        }
+        else {
+            Write-Log "Unexpected BitLocker state encountered." -Level Warning
+        }
+        
+        # Attempt to retrieve recovery key (after any fixes)
+        $updatedStatus = Get-BitLockerVolume -MountPoint "C:"
+        $recoveryPassword = $updatedStatus.KeyProtector | Where-Object { $_.KeyProtectorType -eq 'RecoveryPassword' } | Select-Object -ExpandProperty RecoveryPassword
+        
+        if ($recoveryPassword) {
+            $script:tmprecoverykey = $recoveryPassword
+            Write-Log "Retrieved recovery key successfully."
+        } else {
+            Write-Log "No recovery password found after all attempts." -Level Warning
+            $script:lastError = "No recovery password found."
+        }
+    }
+    catch {
+        $errorMessage = "Error encountered: $_"
+        Write-Log $errorMessage -Level Error
+        $script:lastError = $errorMessage
+    }
+}
+
+# Main execution
+Write-Log "Script started."
+
+# Check Azure AD status first
+$azureStatus = Check-AzureADStatus
+if ($azureStatus -eq "None" -or $azureStatus -eq "Unknown") {
+    Write-Log "Skipping BitLocker operations - device not properly joined to Azure AD." -Level Warning
+    $script:tmprecoverykey = "Device not Azure AD joined/registered"
+    Write-Host "TPM Recovery Key: $tmprecoverykey"
+    exit
+}
+
+Check-BitLockerStatusAndKey
+
+# Output results
+if ($tmprecoverykey -and $tmprecoverykey -ne "Device not Azure AD joined/registered") {
+    Write-Host "TPM Recovery Key: $tmprecoverykey"
+} elseif ($lastError) {
+    Write-Host "Last Error: $lastError"
+} else {
+    Write-Host "TPM Recovery Key: No recovery key available"
+}
+
+Write-Log "Script completed."
