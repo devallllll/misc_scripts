@@ -4,7 +4,7 @@
   .DESCRIPTION
     Removes SupportAssist bloatware, then runs Dell Command Update to apply all available Dell updates silently.
   .NOTES
-    Author: Aaron J. Stevenson
+    Author: Aaron J. Stevenson, David Lane and Claude AI
     Modified to remove SupportAssist and run updates only
 #>
 
@@ -53,7 +53,7 @@ function Remove-DellSupportAssist {
         Write-Output "Successfully stopped $ProcessName"
       }
       catch {
-        Write-Warning "Failed to stop process $ProcessName: $_"
+        Write-Warning "Failed to stop process ${ProcessName}: $($_.Exception.Message)"
       }
     }
   }
@@ -77,7 +77,7 @@ function Remove-DellSupportAssist {
       Write-Output "Successfully removed $($App.DisplayName)"
     }
     catch { 
-      Write-Warning "Failed to remove $($App.DisplayName): $_"
+      Write-Warning "Failed to remove $($App.DisplayName): $($_.Exception.Message)"
       # Don't exit - continue with updates even if SupportAssist removal fails
     }
   }
@@ -110,7 +110,7 @@ function Invoke-DellCommandUpdate {
   }
   catch {
     Write-Warning 'Unable to apply updates using the dcu-cli.'
-    Write-Warning $_
+    Write-Warning $_.Exception.Message
     exit 1
   }
 }
