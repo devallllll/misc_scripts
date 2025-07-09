@@ -70,12 +70,6 @@ Start-Process -NoNewWindow -Wait -FilePath $DCU -ArgumentList '/configure -autoS
 # Run updates in background - prompts user for reboot
 Start-Process -FilePath $DCU -ArgumentList '/applyUpdates -autoSuspendBitLocker=enable -reboot=disable -silent' -WindowStyle Hidden
 
-# Check if reboot will be needed and create task
-Start-Sleep 5  # Give DCU time to assess updates
-$rebootCheck = Start-Process -NoNewWindow -Wait -FilePath $DCU -ArgumentList '/rebootpending' -PassThru
-if ($rebootCheck.ExitCode -eq 0) {
-    Create-PostRebootTask
-    Write-Output "Dell updates started - post-reboot task created"
-} else {
-    Write-Output "Dell updates started in background"
-}
+# Always create post-reboot task to handle any pending updates
+Create-PostRebootTask
+Write-Output "Dell updates started - post-reboot task created for completion"
