@@ -185,7 +185,7 @@ function Install-Chocolatey {
         }
     }
     catch {
-        Write-Log "Failed to install Chocolatey: $($_.Exception.Message)" -Level 'ERROR'
+        Write-Log "Cannot access community.chocolatey.org or install Chocolatey: $($_.Exception.Message)" -Level 'ERROR'
         return $false
     }
 }
@@ -370,13 +370,13 @@ function Main {
         # Step 1: Verify Dell system
         if (-not (Test-DellSystem)) {
             Write-Log "Script not applicable to non-Dell systems. Exiting." -Level 'WARN'
-            exit 0
+            return 0
         }
         
         # Step 2: Check current DCU status
         if (Test-DCUVersion) {
             Write-Log "Dell Command Update is already current. No action needed." -Level 'SUCCESS'
-            exit 0
+            return 0
         }
         
         # Step 3: Ensure Chocolatey is available
@@ -384,7 +384,7 @@ function Main {
             Write-Log "Installing Chocolatey..."
             if (-not (Install-Chocolatey)) {
                 Write-Log "Cannot proceed without Chocolatey. Exiting." -Level 'ERROR'
-                exit 1
+                return 1
             }
         }
         
@@ -395,15 +395,22 @@ function Main {
         # Step 5: Install DCU via Chocolatey
         if (Install-DCUViaChocolatey) {
             Write-Log "=== Dell Command Update management completed successfully ===" -Level 'SUCCESS'
-            exit 0
+            return 0
         } else {
             Write-Log "=== Dell Command Update management failed ===" -Level 'ERROR'
-            exit 1
+            return 1
         }
     }
     catch {
         Write-Log "Script execution failed: $($_.Exception.Message)" -Level 'ERROR'
-        exit 1
+        return 1
+    }
+    finally {
+        # Keep PowerShell window open when run interactively
+        if ($Host.Name -eq "ConsoleHost") {
+            Write-Host "`nScript completed. Press any key to close this window..." -ForegroundColor Cyan
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
     }
 }
 
