@@ -3,7 +3,7 @@
     Schedules dynamic Acrobat 9 removal on shutdown using a self-deleting task.
 
 .VERSION
-    1.3
+    1.4
 .AUTHOR
     Dave Lane / GoodChoice IT Ltd
 #>
@@ -70,7 +70,7 @@ Remove-Item -Path `"$taskScript`" -Force
 
 # === Download Cleaner Tool (TLS 1.2 + robust fallback) ===
 try {
-  # Ensure TLS 1.2 is enabled for this process
+  # Ensure TLS 1.2 is enabled for this process (older OS defaults)
   [Net.ServicePointManager]::SecurityProtocol = `
       [Net.SecurityProtocolType]::Tls12 -bor `
       [Net.SecurityProtocolType]::Tls11 -bor `
@@ -88,8 +88,9 @@ catch {
   }
 }
 
-# === Register Shutdown Task (fix EventTrigger schema) ===
-$taskXml = @"
+# === Register Shutdown Task (safe XML build + UTF-16) ===
+# Build XML as a single-quoted here-string (no expansion/HTML-encoding), then inject $taskScript with -f
+$taskXml = @'
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
@@ -133,14 +134,14 @@ $taskXml = @"
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>powershell.exe</Command>
-      <Arguments>-NoProfile -ExecutionPolicy Bypass -File '$taskScript'</Arguments>
+      <Command>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe</Command>
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -File "{0}"</Arguments>
     </Exec>
   </Actions>
 </Task>
-"@
+'@ -f $taskScript
 
-# Write and register the task
+# Write and register the task (Task Scheduler expects UTF-16LE)
 $taskXmlPath = "$env:TEMP\RemoveAdobeTask.xml"
 $taskXml | Out-File -Encoding Unicode -FilePath $taskXmlPath
 schtasks.exe /Create /TN $taskName /XML $taskXmlPath /F
