@@ -3,61 +3,64 @@
     Schedules dynamic Acrobat 9 removal on shutdown using a self-deleting task.
 
 .VERSION
-    1.2
+    1.3
 .AUTHOR
     Dave Lane / GoodChoice IT Ltd
 #>
 
 # === CONFIG ===
 $scriptFolder = "C:\Scripts"
-$taskScript = "$scriptFolder\RemoveAcrobat9.ps1"
-$cleanerUrl = "https://ardownload2.adobe.com/pub/adobe/acrobat/win/AcrobatDC/2100120135/x64/AdobeAcroCleaner_DC2021.exe"
-$cleanerExe = "$scriptFolder\AdobeAcroCleaner.exe"
-$taskName = "RemoveAdobeAcrobat9"
+$taskScript  = "$scriptFolder\RemoveAcrobat9.ps1"
+$cleanerUrl  = "https://ardownload2.adobe.com/pub/adobe/acrobat/win/AcrobatDC/2100120135/x64/AdobeAcroCleaner_DC2021.exe"
+$cleanerExe  = "$scriptFolder\AdobeAcroCleaner.exe"
+$taskName    = "RemoveAdobeAcrobat9"
 
 # === Create folder ===
 if (-not (Test-Path $scriptFolder)) {
-    New-Item -ItemType Directory -Path $scriptFolder | Out-Null
+  New-Item -ItemType Directory -Path $scriptFolder | Out-Null
 }
 
 # === Write the deferred uninstall script ===
 @"
 # Acrobat 9 Dynamic Uninstall + Cleanup (shutdown-safe)
 
-# Find Acrobat 9 GUIDs from registry
-`$keys = Get-ChildItem 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' |
+# Find Acrobat 9 GUIDs from registry (32-bit uninstall hive on x64)
+`$keys = Get-ChildItem 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
 Where-Object {
-    (Get-ItemProperty \$_).DisplayName -like '*Acrobat*9*' -or \$_."PSChildName" -like '{AC76BA86*}'
+  try {
+    `$p = Get-ItemProperty \$_ -ErrorAction Stop
+    (`$p.DisplayName -like '*Acrobat*9*') -or (\$_.'PSChildName' -like '{AC76BA86*}')
+  } catch { `$false }
 }
 
-`$guids = `$keys | Select-Object -ExpandProperty PSChildName
+`$guids = `$keys | Select-Object -ExpandProperty PSChildName -ErrorAction SilentlyContinue
 
 foreach (`$guid in `$guids) {
-    Start-Process msiexec.exe -ArgumentList "/x `$guid /qn /norestart" -Wait -NoNewWindow
+  Start-Process msiexec.exe -ArgumentList "/x `$guid /qn /norestart" -Wait -NoNewWindow
 }
 
 # Run Acrobat Cleaner
-Start-Process -FilePath `"$cleanerExe`" -ArgumentList "/silent", "/product=0", "/cleanlevel=1", "/scanforothers=1" -Wait
+Start-Process -FilePath `"$cleanerExe`" -ArgumentList "/silent","/product=0","/cleanlevel=1","/scanforothers=1" -Wait
 
 # Kill Acrobat processes before removing folder
-Get-Process -Name "Acrobat", "AdobeARM", "AcroRd32" -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name "Acrobat","AdobeARM","AcroRd32" -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
 
 # Remove folder
 `$installPath = "C:\Program Files (x86)\Adobe\Acrobat 9.0"
 if (Test-Path `$installPath) {
-    try {
-        Remove-Item -Path `$installPath -Recurse -Force -ErrorAction Stop
-        Write-Host "Removed leftover Acrobat 9.0 folder."
-    } catch {
-        Write-Warning "Failed to remove Acrobat folder: `$($_.Exception.Message)"
-    }
+  try {
+    Remove-Item -Path `$installPath -Recurse -Force -ErrorAction Stop
+    Write-Host "Removed leftover Acrobat 9.0 folder."
+  } catch {
+    Write-Warning "Failed to remove Acrobat folder: `$($_.Exception.Message)"
+  }
 }
 
 # Remove orphaned Pro Extended uninstall key
 `$orphan = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{AC76BA86-1033-F400-7761-000000000004}"
 if (Test-Path `$orphan) {
-    Remove-Item -Path `$orphan -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -Path `$orphan -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # Self-delete task and script
@@ -65,20 +68,38 @@ schtasks /Delete /TN "$taskName" /F
 Remove-Item -Path `"$taskScript`" -Force
 "@ | Set-Content -Encoding UTF8 -Path $taskScript
 
-# === Download Cleaner Tool ===
-Invoke-WebRequest -Uri $cleanerUrl -OutFile $cleanerExe
+# === Download Cleaner Tool (TLS 1.2 + robust fallback) ===
+try {
+  # Ensure TLS 1.2 is enabled for this process
+  [Net.ServicePointManager]::SecurityProtocol = `
+      [Net.SecurityProtocolType]::Tls12 -bor `
+      [Net.SecurityProtocolType]::Tls11 -bor `
+      [Net.SecurityProtocolType]::Tls
 
-# === Register Shutdown Task ===
+  $headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT; PowerShell)" }
+  Invoke-WebRequest -Uri $cleanerUrl -OutFile $cleanerExe -Headers $headers -UseBasicParsing -ErrorAction Stop
+}
+catch {
+  Write-Warning "Invoke-WebRequest failed (`$($_.Exception.Message)`), trying BITS…"
+  try {
+    Start-BitsTransfer -Source $cleanerUrl -Destination $cleanerExe -ErrorAction Stop
+  } catch {
+    throw "Failed to download AdobeAcroCleaner via both IWR and BITS: `$($_.Exception.Message)`"
+  }
+}
+
+# === Register Shutdown Task (fix EventTrigger schema) ===
 $taskXml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
     <EventTrigger>
+      <Enabled>true</Enabled>
       <Subscription>
         <QueryList>
           <Query Id="0" Path="System">
             <Select Path="System">
-              *[System[(EventID=1074) and (EventType=0)]]
+              *[System[(EventID=1074)]]
             </Select>
           </Query>
         </QueryList>
@@ -113,7 +134,7 @@ $taskXml = @"
   <Actions Context="Author">
     <Exec>
       <Command>powershell.exe</Command>
-      <Arguments>-NoProfile -ExecutionPolicy Bypass -File "$taskScript"</Arguments>
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -File '$taskScript'</Arguments>
     </Exec>
   </Actions>
 </Task>
