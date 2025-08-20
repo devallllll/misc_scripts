@@ -1,9 +1,8 @@
 <#
 .SYNOPSIS
-    Schedules Acrobat 9 removal on shutdown (no XML; ONEVENT trigger) and cleans up after itself.
-
+    Schedules Acrobat 9 removal on shutdown (ONEVENT trigger, no XML) and self-cleans.
 .VERSION
-    1.4
+    1.4.2
 .AUTHOR
     Dave Lane / GoodChoice IT Ltd
 #>
@@ -48,22 +47,39 @@ foreach ($p in @($scriptFolder, $workRoot, $logFolder)) {
 # =========================
 $deferred = @"
 # Acrobat 9 Dynamic Uninstall + Cleanup (shutdown-safe)
-# Version 1.4
+# Version 1.4.2
 `$ErrorActionPreference = 'Stop'
 
+`$LogFile = '$logFile'
+
 function Write-Log([string]`$msg, [string]`$level='INFO') {
-    try {
-        `$stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-        Add-Content -Path '$logFile' -Value "`$stamp [`$level] `$msg"
-    } catch {}
+    `$stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    `$line  = "`$stamp [`$level] `$msg"
+
+    # Write with shared access + retries to avoid lock issues
+    for (`$i=1; `$i -le 10; `$i++) {
+        try {
+            `$fs = [System.IO.File]::Open(`$LogFile,
+                [System.IO.FileMode]::Append,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::ReadWrite)
+            `$sw = New-Object System.IO.StreamWriter(`$fs)
+            `$sw.WriteLine(`$line)
+            `$sw.Close()
+            `$fs.Close()
+            break
+        } catch {
+            Start-Sleep -Milliseconds 200
+        }
+    }
 }
 
-try { Start-Transcript -Path '$logFile' -Append -ErrorAction SilentlyContinue | Out-Null } catch {}
 Write-Log "=== START ==="
 
 # 1) Stop Acrobat-related processes
 try {
-    Get-Process -Name 'Acrobat','AdobeARM','AcroRd32' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name 'Acrobat','AdobeARM','AcroRd32' -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     Write-Log "Stopped Acrobat processes (if present)."
 } catch { Write-Log "Process stop warning: `$($_.Exception.Message)" 'WARN' }
@@ -90,12 +106,12 @@ try {
 
 # 3) Run Adobe Cleaner (if present)
 try {
-    if (Test-Path '$cleanerExe') {
+    if (Test-Path 'C:\Scripts\AdobeAcroCleaner.exe') {
         Write-Log "Running Acrobat Cleaner."
-        Start-Process -FilePath '$cleanerExe' -ArgumentList '/silent','/product=0','/cleanlevel=1','/scanforothers=1' -Wait -NoNewWindow
+        Start-Process -FilePath 'C:\Scripts\AdobeAcroCleaner.exe' -ArgumentList '/silent','/product=0','/cleanlevel=1','/scanforothers=1' -Wait -NoNewWindow
         Write-Log "Cleaner completed."
     } else {
-        Write-Log "Cleaner missing at '$cleanerExe'." 'WARN'
+        Write-Log "Cleaner missing at 'C:\Scripts\AdobeAcroCleaner.exe'." 'WARN'
     }
 } catch { Write-Log "Cleaner error: `$($_.Exception.Message)" 'ERROR' }
 
@@ -120,17 +136,16 @@ try {
 
 # 6) Self-delete task and script
 try {
-    Write-Log "Deleting scheduled task '$taskName'"
-    schtasks.exe /Delete /TN "$taskName" /F | Out-Null
+    Write-Log "Deleting scheduled task 'RemoveAdobeAcrobat9'"
+    schtasks.exe /Delete /TN "RemoveAdobeAcrobat9" /F | Out-Null
 } catch { Write-Log "Task delete warning: `$($_.Exception.Message)" 'WARN' }
 
 try {
-    Write-Log "Self-deleting script '$taskScript'"
-    Remove-Item -Path '$taskScript' -Force -ErrorAction Stop
+    Write-Log "Self-deleting script 'C:\Scripts\RemoveAcrobat9.ps1'"
+    Remove-Item -Path 'C:\Scripts\RemoveAcrobat9.ps1' -Force -ErrorAction Stop
 } catch { Write-Log "Self-delete warning: `$($_.Exception.Message)" 'WARN' }
 
 Write-Log "=== END ==="
-try { Stop-Transcript | Out-Null } catch {}
 "@
 
 $deferred | Set-Content -Path $taskScript -Encoding UTF8 -Force
@@ -192,5 +207,5 @@ if ($AddEvent6006Fallback) {
 Write-Host "Task registered as SYSTEM. Details:"
 & $SchTasks /Query /TN $taskName /V /FO LIST
 
-Write-Host "`nTest run (optional): schtasks /Run /TN $taskName"
+Write-Host "`nManual test: schtasks /Run /TN $taskName"
 Write-Host "Log (when script runs): $logFile"
