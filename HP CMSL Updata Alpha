@@ -1,0 +1,189 @@
+# HP Client Management Script Library (HPCMSL) Deployment and Update Script
+# This script installs/updates HPCMSL from PowerShell Gallery and applies all updates including BIOS
+
+# Variable Declarations
+# @RebootAfterUpdate@ - Set to $true to automatically reboot after updates if required
+
+# Ensure TLS 1.2 is enabled for PowerShell Gallery
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+function Update-HPModules {
+    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+    
+    # Install/Update NuGet and HPCMSL in one command each
+    if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+        Install-PackageProvider -Name NuGet -Force
+    }
+    
+    if (-not (Get-Module -ListAvailable -Name HPCMSL)) {
+        Install-Module -Name HPCMSL -Force
+    } else {
+        Update-Module -Name HPCMSL -Force
+    }
+}
+
+# Import the module
+try {
+    Import-Module HPCMSL -Force
+    
+    # Check module version
+    $moduleInfo = Get-Module -Name HPCMSL
+    Write-Host "HPCMSL module version $($moduleInfo.Version) imported successfully"
+    
+    # List all commands for debugging
+    $commands = Get-Command -Module HPCMSL
+    Write-Host "Found $($commands.Count) commands in HPCMSL module"
+}
+catch {
+    $errorMsg = "Failed to import HPCMSL module: $($_.Exception.Message)"
+    Write-Host $errorMsg
+    Write-Output $errorMsg
+    exit 1
+}
+
+# Apply updates with specific focus on BIOS
+try {
+    $updatesApplied = $false
+    $biosUpdated = $false
+    $summary = "HP Update Summary: "
+    
+    # Get current BIOS version first
+    if (Get-Command -Name "Get-HPBiosVersion" -ErrorAction SilentlyContinue) {
+        $biosInfo = Get-HPBiosVersion
+        Write-Host "Current BIOS Version: $($biosInfo.BIOSVersion)"
+        $summary += "Current BIOS: $($biosInfo.BIOSVersion). "
+    }
+    
+    # === STEP 1: Check for and install BIOS updates using SoftPaq method ===
+    Write-Host "Checking for HP updates including BIOS..."
+    
+    # Use SoftPaq method for all updates including BIOS
+    if (Get-Command -Name "Get-HPSoftPaqList" -ErrorAction SilentlyContinue) {
+        $allUpdates = Get-HPSoftPaqList
+        
+        # Check if we have updates
+        if ($allUpdates -and $allUpdates.Count -gt 0) {
+            Write-Host "Found $($allUpdates.Count) HP updates. Installing..."
+            
+            # Find BIOS updates
+            $biosUpdates = $allUpdates | Where-Object { $_.Category -like "*BIOS*" }
+            
+            if ($biosUpdates -and $biosUpdates.Count -gt 0) {
+                Write-Host "Found $($biosUpdates.Count) BIOS updates. Installing..."
+                foreach ($update in $biosUpdates) {
+                    Write-Host "Installing BIOS update: $($update.Name) - $($update.Description)"
+                    $update | Install-HPSoftPaq -Force
+                    $biosUpdated = $true
+                }
+                $summary += "BIOS updated via SoftPaq. "
+            } else {
+                Write-Host "No BIOS updates found."
+                $summary += "No BIOS updates needed. "
+            }
+            
+            # Find non-BIOS updates
+            $otherUpdates = $allUpdates | Where-Object { $_.Category -notlike "*BIOS*" }
+            
+            if ($otherUpdates -and $otherUpdates.Count -gt 0) {
+                Write-Host "Found $($otherUpdates.Count) non-BIOS updates. Installing..."
+                foreach ($update in $otherUpdates) {
+                    Write-Host "Installing update: $($update.Name) - $($update.Description)"
+                    $update | Install-HPSoftPaq -Force
+                    $updatesApplied = $true
+                }
+                $summary += "Installed $($otherUpdates.Count) driver/firmware updates. "
+            } else {
+                Write-Host "No additional non-BIOS updates required."
+                $summary += "No additional updates needed. "
+            }
+        } else {
+            Write-Host "No HP updates found."
+            $summary += "No updates needed. "
+        }
+    }
+    # Try using HP firmware and driver updates if SoftPaq not available
+    else {
+        Write-Host "SoftPaq method not available. Trying alternative update methods..."
+        
+        # Try firmware updates if available
+        if (Get-Command -Name "Get-HPFirmwareUpdates" -ErrorAction SilentlyContinue) {
+            $firmwareUpdates = Get-HPFirmwareUpdates
+            
+            if ($firmwareUpdates -and $firmwareUpdates.Count -gt 0) {
+                Write-Host "Found $($firmwareUpdates.Count) firmware updates. Installing..."
+                # Make sure the install command exists
+                if (Get-Command -Name "Install-HPFirmwareUpdates" -ErrorAction SilentlyContinue) {
+                    Install-HPFirmwareUpdates -Force -AcceptEULA
+                    $updatesApplied = $true
+                    $summary += "Installed firmware updates. "
+                } else {
+                    Write-Host "Found firmware updates but Install-HPFirmwareUpdates command not available."
+                    $summary += "Firmware updates available but couldn't install. "
+                }
+            } else {
+                Write-Host "No firmware updates required."
+                $summary += "No firmware updates needed. "
+            }
+        }
+        
+        # Try driver updates if available
+        if (Get-Command -Name "Get-HPDriverUpdates" -ErrorAction SilentlyContinue) {
+            $driverUpdates = Get-HPDriverUpdates
+            
+            if ($driverUpdates -and $driverUpdates.Count -gt 0) {
+                Write-Host "Found $($driverUpdates.Count) driver updates. Installing..."
+                # Make sure the install command exists
+                if (Get-Command -Name "Install-HPDriverUpdates" -ErrorAction SilentlyContinue) {
+                    Install-HPDriverUpdates -Force
+                    $updatesApplied = $true
+                    $summary += "Installed driver updates. "
+                } else {
+                    Write-Host "Found driver updates but Install-HPDriverUpdates command not available."
+                    $summary += "Driver updates available but couldn't install. "
+                }
+            } else {
+                Write-Host "No driver updates required."
+                $summary += "No driver updates needed. "
+            }
+        }
+        
+        # Fall back to QA silent method if others not available
+        if (-not $updatesApplied -and (Get-Command -Name "Get-HPQASilentDriverInstall" -ErrorAction SilentlyContinue)) {
+            Write-Host "Using QA silent driver install method..."
+            Get-HPQASilentDriverInstall -Force
+            $updatesApplied = $true
+            $summary += "Applied updates using QA silent method. "
+        }
+    }
+    
+    # === STEP 2: Determine if a reboot is needed ===
+    $rebootNeeded = $biosUpdated -or $updatesApplied
+    
+    if ($rebootNeeded) {
+        if ('@RebootAfterUpdate@' -eq '$true') {
+            $summary += "System will reboot to complete installation."
+            Write-Host "Updates applied. System will reboot now."
+            
+            # Give a moment for updates to settle
+            Start-Sleep -Seconds 10
+            
+            # Reboot
+            Restart-Computer -Force
+        } else {
+            $summary += "REBOOT REQUIRED to complete installation."
+            Write-Host "Updates applied. REBOOT REQUIRED to complete installation."
+        }
+    } else {
+        $summary += "No reboot needed."
+        Write-Host "No updates applied. No reboot needed."
+    }
+    
+    $result = $summary
+}
+catch {
+    $result = "Error applying updates: $($_.Exception.Message)"
+    Write-Host $result
+}
+
+# Output result
+Write-Output $result
