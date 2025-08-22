@@ -1,189 +1,188 @@
-# HP Client Management Script Library (HPCMSL) Deployment and Update Script
-# This script installs/updates HPCMSL from PowerShell Gallery and applies all updates including BIOS
+<# 
+  HP CMSL + HPIA Update Script — v2025-08-22.3 (PS 5.1 compatible)
+  - Silent NuGet provider bootstrap (no prompts)
+  - Trusts PSGallery, installs/updates HPCMSL
+  - BIOS updates via CMSL (BitLocker handled)
+  - Drivers/Firmware via HP Image Assistant (silent)
+  - Reboot controlled by @RebootAfterUpdate@ token or env var REBOOT_AFTER_UPDATE=true
+#>
 
-# Variable Declarations
-# @RebootAfterUpdate@ - Set to $true to automatically reboot after updates if required
-
-# Ensure TLS 1.2 is enabled for PowerShell Gallery
+#region safety / relaunch
+$ErrorActionPreference = 'Stop'
+$ProgressPreference    = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-function Update-HPModules {
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-    
-    # Install/Update NuGet and HPCMSL in one command each
-    if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-        Install-PackageProvider -Name NuGet -Force
-    }
-    
-    if (-not (Get-Module -ListAvailable -Name HPCMSL)) {
-        Install-Module -Name HPCMSL -Force
-    } else {
-        Update-Module -Name HPCMSL -Force
-    }
+function Invoke-Relaunch64Admin {
+  $ps64 = "$env:WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+  Start-Process $ps64 -ArgumentList $args -Verb RunAs | Out-Null
+  exit 0
 }
 
-# Import the module
+# Relaunch as 64-bit, elevated if needed
+if (-not [Environment]::Is64BitProcess) { Invoke-Relaunch64Admin }
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Invoke-Relaunch64Admin }
+#endregion
+
+#region config
+$token               = '@RebootAfterUpdate@'
+$RebootAfterUpdate   = ($token -eq '$true') -or ($env:REBOOT_AFTER_UPDATE -match '^(1|true|yes)$')
+$WorkRoot            = Join-Path $env:ProgramData 'HP\HPCMSL-Updates'
+$HpiaReport          = Join-Path $WorkRoot 'HPIA\Reports'
+$HpiaDownload        = Join-Path $WorkRoot 'HPIA\Downloads'
+New-Item -ItemType Directory -Force -Path $WorkRoot,$HpiaReport,$HpiaDownload | Out-Null
+#endregion
+
+#region silent NuGet provider + PSGallery bootstrap (no prompts)
 try {
-    Import-Module HPCMSL -Force
-    
-    # Check module version
-    $moduleInfo = Get-Module -Name HPCMSL
-    Write-Host "HPCMSL module version $($moduleInfo.Version) imported successfully"
-    
-    # List all commands for debugging
-    $commands = Get-Command -Module HPCMSL
-    Write-Host "Found $($commands.Count) commands in HPCMSL module"
+  # Ensure PSGallery exists & is trusted (avoid "untrusted repo" prompts)
+  if (-not (Get-PSRepository -Name 'PSGallery' -ErrorAction SilentlyContinue)) {
+    try { Register-PSRepository -Default -ErrorAction Stop } catch {
+      Register-PSRepository -Name 'PSGallery' `
+        -SourceLocation 'https://www.powershellgallery.com/api/v2' `
+        -ScriptSourceLocation 'https://www.powershellgallery.com/api/v2' `
+        -InstallationPolicy Trusted
+    }
+  }
+  Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+
+  # Ensure NuGet provider (silent bootstrap)
+  $nugetProv = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
+  if (-not $nugetProv -or $nugetProv.Version -lt [version]'2.8.5.201') {
+    Find-PackageProvider -Name NuGet -ForceBootstrap -IncludeDependencies -ErrorAction Stop | Out-Null
+    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope AllUsers -Force -Confirm:$false | Out-Null
+    Import-PackageProvider  -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+  }
 }
 catch {
-    $errorMsg = "Failed to import HPCMSL module: $($_.Exception.Message)"
-    Write-Host $errorMsg
-    Write-Output $errorMsg
-    exit 1
+  Write-Output "Failed to bootstrap NuGet/PSGallery: $($_.Exception.Message)"
+  exit 1
 }
+#endregion
 
-# Apply updates with specific focus on BIOS
+#region install / update HPCMSL
 try {
-    $updatesApplied = $false
-    $biosUpdated = $false
-    $summary = "HP Update Summary: "
-    
-    # Get current BIOS version first
-    if (Get-Command -Name "Get-HPBiosVersion" -ErrorAction SilentlyContinue) {
-        $biosInfo = Get-HPBiosVersion
-        Write-Host "Current BIOS Version: $($biosInfo.BIOSVersion)"
-        $summary += "Current BIOS: $($biosInfo.BIOSVersion). "
-    }
-    
-    # === STEP 1: Check for and install BIOS updates using SoftPaq method ===
-    Write-Host "Checking for HP updates including BIOS..."
-    
-    # Use SoftPaq method for all updates including BIOS
-    if (Get-Command -Name "Get-HPSoftPaqList" -ErrorAction SilentlyContinue) {
-        $allUpdates = Get-HPSoftPaqList
-        
-        # Check if we have updates
-        if ($allUpdates -and $allUpdates.Count -gt 0) {
-            Write-Host "Found $($allUpdates.Count) HP updates. Installing..."
-            
-            # Find BIOS updates
-            $biosUpdates = $allUpdates | Where-Object { $_.Category -like "*BIOS*" }
-            
-            if ($biosUpdates -and $biosUpdates.Count -gt 0) {
-                Write-Host "Found $($biosUpdates.Count) BIOS updates. Installing..."
-                foreach ($update in $biosUpdates) {
-                    Write-Host "Installing BIOS update: $($update.Name) - $($update.Description)"
-                    $update | Install-HPSoftPaq -Force
-                    $biosUpdated = $true
-                }
-                $summary += "BIOS updated via SoftPaq. "
-            } else {
-                Write-Host "No BIOS updates found."
-                $summary += "No BIOS updates needed. "
-            }
-            
-            # Find non-BIOS updates
-            $otherUpdates = $allUpdates | Where-Object { $_.Category -notlike "*BIOS*" }
-            
-            if ($otherUpdates -and $otherUpdates.Count -gt 0) {
-                Write-Host "Found $($otherUpdates.Count) non-BIOS updates. Installing..."
-                foreach ($update in $otherUpdates) {
-                    Write-Host "Installing update: $($update.Name) - $($update.Description)"
-                    $update | Install-HPSoftPaq -Force
-                    $updatesApplied = $true
-                }
-                $summary += "Installed $($otherUpdates.Count) driver/firmware updates. "
-            } else {
-                Write-Host "No additional non-BIOS updates required."
-                $summary += "No additional updates needed. "
-            }
-        } else {
-            Write-Host "No HP updates found."
-            $summary += "No updates needed. "
-        }
-    }
-    # Try using HP firmware and driver updates if SoftPaq not available
-    else {
-        Write-Host "SoftPaq method not available. Trying alternative update methods..."
-        
-        # Try firmware updates if available
-        if (Get-Command -Name "Get-HPFirmwareUpdates" -ErrorAction SilentlyContinue) {
-            $firmwareUpdates = Get-HPFirmwareUpdates
-            
-            if ($firmwareUpdates -and $firmwareUpdates.Count -gt 0) {
-                Write-Host "Found $($firmwareUpdates.Count) firmware updates. Installing..."
-                # Make sure the install command exists
-                if (Get-Command -Name "Install-HPFirmwareUpdates" -ErrorAction SilentlyContinue) {
-                    Install-HPFirmwareUpdates -Force -AcceptEULA
-                    $updatesApplied = $true
-                    $summary += "Installed firmware updates. "
-                } else {
-                    Write-Host "Found firmware updates but Install-HPFirmwareUpdates command not available."
-                    $summary += "Firmware updates available but couldn't install. "
-                }
-            } else {
-                Write-Host "No firmware updates required."
-                $summary += "No firmware updates needed. "
-            }
-        }
-        
-        # Try driver updates if available
-        if (Get-Command -Name "Get-HPDriverUpdates" -ErrorAction SilentlyContinue) {
-            $driverUpdates = Get-HPDriverUpdates
-            
-            if ($driverUpdates -and $driverUpdates.Count -gt 0) {
-                Write-Host "Found $($driverUpdates.Count) driver updates. Installing..."
-                # Make sure the install command exists
-                if (Get-Command -Name "Install-HPDriverUpdates" -ErrorAction SilentlyContinue) {
-                    Install-HPDriverUpdates -Force
-                    $updatesApplied = $true
-                    $summary += "Installed driver updates. "
-                } else {
-                    Write-Host "Found driver updates but Install-HPDriverUpdates command not available."
-                    $summary += "Driver updates available but couldn't install. "
-                }
-            } else {
-                Write-Host "No driver updates required."
-                $summary += "No driver updates needed. "
-            }
-        }
-        
-        # Fall back to QA silent method if others not available
-        if (-not $updatesApplied -and (Get-Command -Name "Get-HPQASilentDriverInstall" -ErrorAction SilentlyContinue)) {
-            Write-Host "Using QA silent driver install method..."
-            Get-HPQASilentDriverInstall -Force
-            $updatesApplied = $true
-            $summary += "Applied updates using QA silent method. "
-        }
-    }
-    
-    # === STEP 2: Determine if a reboot is needed ===
-    $rebootNeeded = $biosUpdated -or $updatesApplied
-    
-    if ($rebootNeeded) {
-        if ('@RebootAfterUpdate@' -eq '$true') {
-            $summary += "System will reboot to complete installation."
-            Write-Host "Updates applied. System will reboot now."
-            
-            # Give a moment for updates to settle
-            Start-Sleep -Seconds 10
-            
-            # Reboot
-            Restart-Computer -Force
-        } else {
-            $summary += "REBOOT REQUIRED to complete installation."
-            Write-Host "Updates applied. REBOOT REQUIRED to complete installation."
-        }
-    } else {
-        $summary += "No reboot needed."
-        Write-Host "No updates applied. No reboot needed."
-    }
-    
-    $result = $summary
+  if (-not (Get-Module -ListAvailable -Name HPCMSL)) {
+    Install-Module -Name HPCMSL -AcceptLicense -Force -Scope AllUsers -Confirm:$false
+  } else {
+    try { Update-Module -Name HPCMSL -Force -ErrorAction Stop } catch { }
+  }
+
+  Import-Module HPCMSL -Force -ErrorAction Stop
+  $cmsl = Get-Module HPCMSL
+  Write-Host "HPCMSL $($cmsl.Version) imported."
 }
 catch {
-    $result = "Error applying updates: $($_.Exception.Message)"
-    Write-Host $result
+  Write-Output "Failed to install/import HPCMSL: $($_.Exception.Message)"
+  exit 1
+}
+#endregion
+
+#region info + helpers
+$summary    = [System.Text.StringBuilder]::new()
+$null       = $summary.Append("HP Update Summary: ")
+$biosInfo   = $null
+
+# Try both name variants across CMSL versions
+if (Get-Command Get-HPBIOSVersion -ErrorAction SilentlyContinue) { $biosInfo = Get-HPBIOSVersion }
+elseif (Get-Command Get-HPBiosVersion -ErrorAction SilentlyContinue) { $biosInfo = Get-HPBiosVersion }
+
+if ($biosInfo) {
+  $null = $summary.Append("Current BIOS: $($biosInfo.BIOSVersion). ")
+  Write-Host "Current BIOS: $($biosInfo.BIOSVersion)"
+} else {
+  Write-Host "Could not read BIOS version."
 }
 
-# Output result
-Write-Output $result
+function Get-HpiaExe {
+  $exe = Join-Path $env:ProgramData 'HP\HP Image Assistant\HPImageAssistant.exe'
+  if (Test-Path $exe) { return $exe }
+  $candidate = Get-ChildItem -Path "$env:ProgramData\HP" -Filter HPImageAssistant.exe -Recurse -ErrorAction SilentlyContinue |
+               Select-Object -First 1 -ExpandProperty FullName
+  return $candidate
+}
+#endregion
+
+#region BIOS update via CMSL (handles BitLocker) — PS 5.1 style (no ??)
+$biosUpdated = $false
+try {
+  $biosCmd = Get-Command Get-HPBIOSUpdates -ErrorAction SilentlyContinue
+  if (-not $biosCmd) { $biosCmd = Get-Command Get-HPBiosUpdates -ErrorAction SilentlyContinue }
+
+  if ($biosCmd) {
+    $cmdName = $biosCmd.Name
+    $isLatest = & $cmdName -Check
+    if (-not $isLatest) {
+      Write-Host "New BIOS available. Flashing (BitLocker suspended if enabled)..."
+      & $cmdName -Flash -Yes -BitLocker suspend -Quiet -Overwrite -Force
+      $biosUpdated = $true
+      $null = $summary.Append("BIOS updated. ")
+    } else {
+      $null = $summary.Append("No BIOS update needed. ")
+    }
+  } else {
+    $null = $summary.Append("BIOS cmdlet not available. ")
+  }
+}
+catch {
+  $null = $summary.Append("BIOS update failed: $($_.Exception.Message). ")
+  Write-Host "BIOS update failed: $($_.Exception.Message)"
+}
+#endregion
+
+#region Drivers/Firmware via HPIA (silent)
+$driversUpdated = $false
+try {
+  Install-HPImageAssistant -Quiet | Out-Null
+  $hpiaExe = Get-HpiaExe
+  if (-not $hpiaExe) { throw "HPImageAssistant.exe not found after install." }
+
+  $args = @(
+    '/Operation:Analyze'
+    '/Action:Install'
+    '/Selection:All'
+    '/Category:Drivers,Software,Firmware'
+    "/ReportFolder:`"$HpiaReport`""
+    "/SoftpaqDownloadFolder:`"$HpiaDownload`""
+    '/Noninteractive'
+    '/Silent'
+    '/RunHidden'
+  ) -join ' '
+
+  Write-Host "Running HPIA..."
+  $proc = Start-Process -FilePath $hpiaExe -ArgumentList $args -Wait -PassThru
+  $exit = $proc.ExitCode
+
+  if ($exit -eq 256) {
+    $null = $summary.Append("No driver/firmware updates needed. ")
+  } else {
+    $driversUpdated = $true
+    $null = $summary.Append("Drivers/firmware processed by HPIA (exit $exit). ")
+  }
+}
+catch {
+  $null = $summary.Append("HPIA failed: $($_.Exception.Message). ")
+  Write-Host "HPIA failed: $($_.Exception.Message)"
+}
+#endregion
+
+#region reboot logic & output
+$rebootNeeded = $biosUpdated -or $driversUpdated
+if ($rebootNeeded) {
+  if ($RebootAfterUpdate) {
+    $null = $summary.Append("System will reboot to complete installation.")
+    Write-Host "Rebooting..."
+    Start-Sleep -Seconds 8
+    Restart-Computer -Force
+  } else {
+    $null = $summary.Append("REBOOT REQUIRED to complete installation.")
+    Write-Host "REBOOT REQUIRED to complete installation."
+  }
+} else {
+  $null = $summary.Append("No reboot needed.")
+  Write-Host "No reboot needed."
+}
+
+Write-Output $summary.ToString()
+#endregion
