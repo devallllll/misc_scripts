@@ -1,0 +1,70 @@
+<# 
+Exchange / Server prereqs - simple installer
+Edit the URLs/IDs in the "WHAT WE INSTALL" section only.
+#>
+
+$ErrorActionPreference = "Continue"
+$Failed = @()
+
+# ==========================
+# WHAT WE INSTALL (EDIT HERE)
+# ==========================
+$VC2015_ID   = "Microsoft.VCRedist.2015+.x64"
+$VC2013_ID   = "Microsoft.VCRedist.2013.x64"
+$UCMA_URL    = "https://download.microsoft.com/download/2/c/4/2c47a5c1-a1f3-4843-b9fe-84c0032c61ec/UcmaRuntimeSetup.exe"
+$REWRITE_MSI = "https://download.microsoft.com/download/1/2/8/128E2E22-C1B9-44A4-BE2A-5859ED1D4592/rewrite_amd64_en-US.msi"
+
+# ==========================
+# DO THE WORK
+# ==========================
+
+Write-Host "Updating winget sources..."
+try { winget source update | Out-Host } catch { Write-Host "WARN: winget source update failed: $($_.Exception.Message)" }
+
+# --- VC++ 2015-2022 (x64)
+Write-Host "`nInstalling VC++ 2015-2022 (x64)..."
+winget install --id $VC2015_ID -e --source winget --accept-source-agreements --accept-package-agreements
+if ($LASTEXITCODE -ne 0) { $Failed += "VC++ 2015-2022 (x64) (winget id: $VC2015_ID) exit=$LASTEXITCODE" }
+
+# --- VC++ 2013 (x64)
+Write-Host "`nInstalling VC++ 2013 (x64)..."
+winget install --id $VC2013_ID -e --source winget --accept-source-agreements --accept-package-agreements
+if ($LASTEXITCODE -ne 0) { $Failed += "VC++ 2013 (x64) (winget id: $VC2013_ID) exit=$LASTEXITCODE" }
+
+# --- UCMA Runtime (EXE)
+Write-Host "`nDownloading + installing UCMA Runtime..."
+$ucmaPath = Join-Path $env:TEMP "UcmaRuntimeSetup.exe"
+try {
+  Invoke-WebRequest $UCMA_URL -OutFile $ucmaPath -UseBasicParsing
+  Start-Process $ucmaPath -ArgumentList "/quiet" -Wait
+  if ($LASTEXITCODE -notin 0,3010) { $Failed += "UCMA Runtime exit=$LASTEXITCODE" }
+} catch {
+  $Failed += "UCMA Runtime error: $($_.Exception.Message)"
+}
+
+# --- IIS URL Rewrite 2.1 (MSI)
+Write-Host "`nDownloading + installing IIS URL Rewrite 2.1..."
+$rewritePath = Join-Path $env:TEMP "rewrite_amd64_en-US.msi"
+try {
+  Invoke-WebRequest $REWRITE_MSI -OutFile $rewritePath -UseBasicParsing
+  Start-Process "msiexec.exe" -ArgumentList "/i `"$rewritePath`" /qn /norestart" -Wait
+  if ($LASTEXITCODE -notin 0,3010) { $Failed += "IIS URL Rewrite exit=$LASTEXITCODE" }
+} catch {
+  $Failed += "IIS URL Rewrite error: $($_.Exception.Message)"
+}
+
+# ==========================
+# REPORT
+# ==========================
+Write-Host "`n===================="
+Write-Host "INSTALL REPORT"
+Write-Host "===================="
+
+if ($Failed.Count -gt 0) {
+  Write-Host "`nFAILED:"
+  $Failed | ForEach-Object { Write-Host " - $_" }
+  exit 1
+} else {
+  Write-Host "`nAll installs completed OK."
+  exit 0
+}
